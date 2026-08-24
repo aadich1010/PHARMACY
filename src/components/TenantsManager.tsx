@@ -48,7 +48,7 @@ export const TenantsManager: React.FC<{ isOpenModalOnly?: boolean; onCloseModal?
     try {
       await api.createTenant({
         ...formTenant,
-        status: 'active',
+        lowStockDefaultThreshold: formTenant.lowStockThreshold,
       });
 
       addNotification('success', 'Branch Registered', `${formTenant.name} has been added to the multi-tenant network.`);
@@ -78,7 +78,10 @@ export const TenantsManager: React.FC<{ isOpenModalOnly?: boolean; onCloseModal?
     if (!editingTenant) return;
 
     try {
-      await api.updateTenant(editingTenant.id, formTenant);
+      await api.updateTenant(editingTenant.id, {
+        ...formTenant,
+        lowStockDefaultThreshold: formTenant.lowStockThreshold,
+      });
       addNotification('success', 'Branch Updated', `${formTenant.name} settings updated.`);
       setEditingTenant(null);
       await refreshData();

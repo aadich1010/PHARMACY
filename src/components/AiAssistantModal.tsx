@@ -126,10 +126,10 @@ export const AiAssistantModal: React.FC = () => {
   };
 
   const handleLoadPrescriptionToCart = () => {
-    if (!parsedRxResult || !parsedRxResult.matchedMedications) return;
+    if (!parsedRxResult || !parsedRxResult.prescribedItems) return;
     let addedCount = 0;
-    parsedRxResult.matchedMedications.forEach((m: any) => {
-      const item = inventory.find((inv) => inv.id === m.matchedCatalogId);
+    parsedRxResult.prescribedItems.forEach((m: any) => {
+      const item = inventory.find((inv) => inv.id === m.matchedMedicineId);
       if (item && item.totalStock > 0) {
         addToCart(item, undefined, 1);
         addedCount++;
@@ -154,7 +154,7 @@ export const AiAssistantModal: React.FC = () => {
               <div className="flex items-center gap-2">
                 <h2 className="text-lg font-bold tracking-tight">AI Pharmacist Intelligence Hub</h2>
                 <span className="text-[10px] uppercase font-bold px-2.5 py-0.5 rounded-full bg-cyan-400/20 text-cyan-200 border border-cyan-400/30">
-                  Powered by Gemini 3.7 Flash
+                  Powered by Gemini 2.5 Flash
                 </span>
               </div>
               <p className="text-xs text-cyan-100/70">
@@ -281,11 +281,11 @@ export const AiAssistantModal: React.FC = () => {
                   <div className="grid grid-cols-3 gap-3 bg-white/80 p-3.5 rounded-2xl border border-white/80 text-slate-700 shadow-xs">
                     <div>
                       <span className="text-slate-400 block text-[10px]">Patient</span>
-                      <strong className="text-slate-900">{parsedRxResult.patientName || 'Not specified'}</strong>
+                      <strong className="text-slate-900">{parsedRxResult.detectedPatientName || 'Not specified'}</strong>
                     </div>
                     <div>
                       <span className="text-slate-400 block text-[10px]">Prescribing Doctor</span>
-                      <strong className="text-slate-900">{parsedRxResult.doctorName || 'Not specified'}</strong>
+                      <strong className="text-slate-900">{parsedRxResult.detectedDoctorName || 'Not specified'}</strong>
                     </div>
                     <div>
                       <span className="text-slate-400 block text-[10px]">Clinical Diagnosis</span>
@@ -297,39 +297,57 @@ export const AiAssistantModal: React.FC = () => {
                   <div>
                     <h4 className="font-bold text-cyan-950 mb-2">Extracted Medications & Catalog Match</h4>
                     <div className="space-y-2">
-                      {parsedRxResult.matchedMedications?.map((item: any, i: number) => (
-                        <div key={i} className="bg-white/90 p-3.5 rounded-2xl border border-white/80 shadow-xs flex items-center justify-between">
-                          <div>
-                            <div className="flex items-center gap-2">
-                              <span className="font-bold text-slate-900 text-sm">{item.prescribedName}</span>
-                              {item.inStock ? (
-                                <span className="px-2.5 py-0.5 rounded-full bg-emerald-500/15 text-emerald-800 text-[10px] font-bold border border-emerald-500/30">
-                                  In Stock
-                                </span>
-                              ) : (
-                                <span className="px-2.5 py-0.5 rounded-full bg-rose-500/15 text-rose-800 text-[10px] font-bold border border-rose-500/30">
-                                  Catalog Match Needed
-                                </span>
+                      {parsedRxResult.prescribedItems?.map((item: any, i: number) => {
+                        const matched = item.matchedMedicineId
+                          ? inventory.find((inv) => inv.id === item.matchedMedicineId)
+                          : undefined;
+                        const inStock = !!matched && matched.totalStock > 0;
+                        return (
+                          <div key={i} className="bg-white/90 p-3.5 rounded-2xl border border-white/80 shadow-xs flex items-center justify-between">
+                            <div>
+                              <div className="flex items-center gap-2">
+                                <span className="font-bold text-slate-900 text-sm">{item.medicineName}</span>
+                                {inStock ? (
+                                  <span className="px-2.5 py-0.5 rounded-full bg-emerald-500/15 text-emerald-800 text-[10px] font-bold border border-emerald-500/30">
+                                    In Stock
+                                  </span>
+                                ) : (
+                                  <span className="px-2.5 py-0.5 rounded-full bg-rose-500/15 text-rose-800 text-[10px] font-bold border border-rose-500/30">
+                                    Catalog Match Needed
+                                  </span>
+                                )}
+                              </div>
+                              <div className="text-[11px] text-slate-500 mt-0.5 font-medium">
+                                {item.genericName ? <>Generic: <strong className="text-slate-800">{item.genericName}</strong> • </> : null}Dosage: <strong className="text-slate-800">{item.dosage}</strong>{item.quantity ? <> • Qty: <strong className="text-slate-800">{item.quantity}</strong></> : null}
+                              </div>
+                              {item.safetyNotes && (
+                                <div className="text-[10px] text-cyan-900 mt-0.5 font-semibold">
+                                  Notes: {item.safetyNotes}
+                                </div>
                               )}
                             </div>
-                            <div className="text-[11px] text-slate-500 mt-0.5 font-medium">
-                              Dosage: <strong className="text-slate-800">{item.dosage}</strong> • Frequency: <strong className="text-slate-800">{item.frequency}</strong> • Duration: {item.duration}
-                            </div>
-                            {item.instructions && (
-                              <div className="text-[10px] text-cyan-900 mt-0.5 font-semibold">
-                                Notes: {item.instructions}
-                              </div>
-                            )}
                           </div>
-                        </div>
-                      ))}
+                        );
+                      })}
                     </div>
                   </div>
 
+                  {/* Clinical Warnings */}
+                  {parsedRxResult.clinicalWarnings?.length > 0 && (
+                    <div className="bg-rose-500/15 p-3.5 rounded-2xl border border-rose-500/30 text-rose-950 text-xs font-medium space-y-1">
+                      <strong className="font-bold text-rose-900 block">Clinical Warnings:</strong>
+                      <ul className="list-disc list-inside space-y-0.5">
+                        {parsedRxResult.clinicalWarnings.map((w: string, i: number) => (
+                          <li key={i}>{w}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+
                   {/* Pharmacist Guidance */}
-                  {parsedRxResult.clinicalNotes && (
+                  {parsedRxResult.summaryAdvice && (
                     <div className="bg-amber-500/15 p-3.5 rounded-2xl border border-amber-500/30 text-amber-950 text-xs font-medium">
-                      <strong className="font-bold text-amber-900">Pharmacist Dispensing Caution:</strong> {parsedRxResult.clinicalNotes}
+                      <strong className="font-bold text-amber-900">Pharmacist Dispensing Caution:</strong> {parsedRxResult.summaryAdvice}
                     </div>
                   )}
                 </div>
@@ -427,13 +445,13 @@ export const AiAssistantModal: React.FC = () => {
                   <div className="flex items-center justify-between">
                     <span className="font-bold text-slate-900">Safety Verdict:</span>
                     <span className={`px-3 py-1 rounded-full text-xs font-bold ${
-                      interactionResult.overallRisk === 'High' 
+                      interactionResult.overallRiskLevel === 'HIGH' || interactionResult.overallRiskLevel === 'CRITICAL' 
                         ? 'bg-rose-500/15 text-rose-800 border border-rose-500/30' 
-                        : interactionResult.overallRisk === 'Moderate'
+                        : interactionResult.overallRiskLevel === 'MODERATE'
                         ? 'bg-amber-500/15 text-amber-800 border border-amber-500/30'
                         : 'bg-emerald-500/15 text-emerald-800 border border-emerald-500/30'
                     }`}>
-                      Risk Level: {interactionResult.overallRisk}
+                      Risk Level: {interactionResult.overallRiskLevel}
                     </span>
                   </div>
 
@@ -441,20 +459,26 @@ export const AiAssistantModal: React.FC = () => {
                     {interactionResult.interactions?.map((inter: any, idx: number) => (
                       <div key={idx} className="bg-white/90 p-4 rounded-2xl border border-white/80 shadow-xs space-y-2">
                         <div className="flex items-center justify-between">
-                          <strong className="text-slate-900 font-bold">{inter.drugsInvolved}</strong>
+                          <strong className="text-slate-900 font-bold">{inter.drugA} + {inter.drugB}</strong>
                           <span className={`text-[10px] font-bold px-2.5 py-0.5 rounded-full ${
-                            inter.severity === 'Severe' ? 'bg-rose-500/15 text-rose-800 border border-rose-500/30' : 'bg-amber-500/15 text-amber-800 border border-amber-500/30'
+                            inter.severity === 'SEVERE' ? 'bg-rose-500/15 text-rose-800 border border-rose-500/30' : 'bg-amber-500/15 text-amber-800 border border-amber-500/30'
                           }`}>
                             {inter.severity}
                           </span>
                         </div>
                         <p className="text-slate-600 text-xs">{inter.mechanism}</p>
                         <div className="text-cyan-950 font-semibold text-[11px] bg-cyan-500/10 p-2.5 rounded-xl border border-cyan-500/20">
-                          Clinical Action: {inter.recommendation}
+                          Clinical Action: {inter.clinicalRecommendation}
                         </div>
                       </div>
                     ))}
                   </div>
+
+                  {interactionResult.pharmacistGuidance && (
+                    <div className="text-cyan-950 font-semibold text-[11px] bg-teal-500/10 p-3 rounded-xl border border-teal-500/20">
+                      <strong className="font-bold text-teal-900">Pharmacist Guidance:</strong> {interactionResult.pharmacistGuidance}
+                    </div>
+                  )}
                 </div>
               )}
             </div>
@@ -487,44 +511,85 @@ export const AiAssistantModal: React.FC = () => {
                 </button>
               </div>
 
-              {reorderResult && (
+              {reorderResult && (() => {
+                const purchaseOrders = reorderResult.recommendedPurchaseOrders || [];
+                const flatItems = purchaseOrders.flatMap((po: any) =>
+                  (po.items || []).map((it: any) => ({
+                    ...it,
+                    supplierName: po.supplierName,
+                    rationale: po.rationale,
+                  }))
+                );
+                const budget = purchaseOrders.reduce(
+                  (sum: number, po: any) =>
+                    sum +
+                    (po.estimatedTotalCost ||
+                      (po.items || []).reduce(
+                        (s: number, it: any) => s + (it.suggestedQuantity || 0) * (it.estimatedUnitCost || 0),
+                        0
+                      )),
+                  0
+                );
+                return (
                 <div className="bg-white/60 rounded-3xl p-5 border border-white/70 space-y-4 animate-in fade-in shadow-xs">
+                  {reorderResult.executiveSummary && (
+                    <div className="bg-amber-500/10 p-3.5 rounded-2xl border border-amber-500/20 text-amber-950 text-[11px] font-medium">
+                      {reorderResult.executiveSummary}
+                    </div>
+                  )}
                   <div className="flex justify-between items-center bg-white/90 p-4 rounded-2xl border border-white/80 shadow-xs">
                     <div>
                       <span className="text-slate-400 text-[10px] block font-medium">Estimated Reorder Budget</span>
                       <strong className="text-base text-cyan-950 font-extrabold">
-                        {currentTenant?.currency || 'PKR'} {reorderResult.totalEstimatedBudget?.toLocaleString()}
+                        {currentTenant?.currency || 'PKR'} {budget.toLocaleString()}
                       </strong>
                     </div>
                     <div className="text-right">
                       <span className="text-slate-400 text-[10px] block font-medium">Priority Recommendations</span>
-                      <strong className="text-emerald-700 font-extrabold">{reorderResult.recommendedItems?.length} Formulations</strong>
+                      <strong className="text-emerald-700 font-extrabold">{flatItems.length} Formulations</strong>
                     </div>
                   </div>
 
                   <div className="space-y-2.5">
-                    {reorderResult.recommendedItems?.map((rec: any, idx: number) => (
+                    {flatItems.map((rec: any, idx: number) => {
+                      const matched = rec.medicineId ? inventory.find((inv) => inv.id === rec.medicineId) : undefined;
+                      const currentStock = matched ? matched.totalStock : 0;
+                      const lineCost = (rec.suggestedQuantity || 0) * (rec.estimatedUnitCost || 0);
+                      return (
                       <div key={idx} className="bg-white/90 p-4 rounded-2xl border border-white/80 shadow-xs flex items-center justify-between">
                         <div>
                           <div className="font-bold text-slate-900">{rec.medicineName}</div>
                           <div className="text-[11px] text-slate-500">
-                            Current Stock: <strong className="text-rose-600">{rec.currentStock} units</strong> • Reorder: <strong className="text-emerald-700 font-bold">+{rec.suggestedOrderQty} units</strong>
+                            Current Stock: <strong className="text-rose-600">{currentStock} units</strong> • Reorder: <strong className="text-emerald-700 font-bold">+{rec.suggestedQuantity} units</strong>
                           </div>
-                          <div className="text-[10px] text-slate-400 mt-0.5">Supplier: {rec.supplier} • Reason: {rec.reason}</div>
+                          <div className="text-[10px] text-slate-400 mt-0.5">Supplier: {rec.supplierName} • Reason: {rec.rationale}</div>
                         </div>
                         <div className="text-right">
-                          <div className="font-bold text-slate-900">PKR {rec.estimatedCost?.toLocaleString()}</div>
+                          <div className="font-bold text-slate-900">{currentTenant?.currency || 'PKR'} {lineCost.toLocaleString()}</div>
                           <span className={`px-2.5 py-0.5 rounded-full text-[9px] font-bold ${
-                            rec.urgency === 'High' ? 'bg-rose-500/15 text-rose-800 border border-rose-500/30' : 'bg-amber-500/15 text-amber-800 border border-amber-500/30'
+                            rec.priority === 'HIGH' ? 'bg-rose-500/15 text-rose-800 border border-rose-500/30' : 'bg-amber-500/15 text-amber-800 border border-amber-500/30'
                           }`}>
-                            {rec.urgency} Urgency
+                            {rec.priority} Priority
                           </span>
                         </div>
                       </div>
-                    ))}
+                      );
+                    })}
                   </div>
+
+                  {reorderResult.stockOptimizationTips?.length > 0 && (
+                    <div className="bg-cyan-500/10 p-3.5 rounded-2xl border border-cyan-500/20 text-cyan-950 text-[11px] font-medium space-y-1">
+                      <strong className="font-bold text-cyan-900 block">Stock Optimization Tips:</strong>
+                      <ul className="list-disc list-inside space-y-0.5">
+                        {reorderResult.stockOptimizationTips.map((tip: string, i: number) => (
+                          <li key={i}>{tip}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
                 </div>
-              )}
+                );
+              })()}
             </div>
           )}
 
@@ -554,7 +619,7 @@ export const AiAssistantModal: React.FC = () => {
                 <div className="bg-white/60 rounded-3xl p-5 border border-white/70 space-y-4 animate-in fade-in text-slate-700 shadow-xs">
                   <div className="bg-white/90 p-4 rounded-2xl border border-white/80 shadow-xs">
                     <h4 className="font-bold text-slate-900 text-sm mb-1">Executive Summary</h4>
-                    <p className="text-slate-600 leading-relaxed">{summaryResult.executiveSummary}</p>
+                    <p className="text-slate-600 leading-relaxed">{summaryResult.headline}</p>
                   </div>
 
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
@@ -563,7 +628,7 @@ export const AiAssistantModal: React.FC = () => {
                         <TrendingUp className="w-4 h-4 text-emerald-600" /> Top Revenue Drivers
                       </h4>
                       <ul className="space-y-1 list-disc list-inside text-slate-600">
-                        {summaryResult.growthHighlights?.map((h: string, i: number) => (
+                        {summaryResult.keyHighlights?.map((h: string, i: number) => (
                           <li key={i}>{h}</li>
                         ))}
                       </ul>
@@ -574,7 +639,7 @@ export const AiAssistantModal: React.FC = () => {
                         <AlertTriangle className="w-4 h-4 text-amber-600" /> Operational Action Items
                       </h4>
                       <ul className="space-y-1 list-disc list-inside text-slate-600">
-                        {summaryResult.actionItems?.map((a: string, i: number) => (
+                        {summaryResult.strategicRecommendations?.map((a: string, i: number) => (
                           <li key={i}>{a}</li>
                         ))}
                       </ul>

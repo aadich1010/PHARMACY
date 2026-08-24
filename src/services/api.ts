@@ -112,7 +112,7 @@ export const api = {
   // Analytics
   getNetworkAnalytics: () => fetchJSON<NetworkAnalytics>('/api/analytics/network'),
 
-  // AI Services (Gemini 3.7 Flash)
+  // AI Services (Gemini 2.5 Flash)
   analyzePrescription: (payload: { text: string; tenantId?: string; patientConditions?: string[]; patientAllergies?: string[] }) =>
     fetchJSON<any>('/api/ai/analyze-prescription', { method: 'POST', body: JSON.stringify(payload) }),
 

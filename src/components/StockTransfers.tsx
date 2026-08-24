@@ -53,8 +53,7 @@ export const StockTransfers: React.FC = () => {
       const med = inventory.find((i) => i.id === newTransfer.medicineId);
       await api.createTransfer({
         ...newTransfer,
-        requestedById: currentUser.id,
-        requestedByName: currentUser.name,
+        requestedBy: currentUser.name,
       });
 
       addNotification('success', 'Transfer Requested', `Stock transfer requested for ${med?.brandName}.`);
@@ -151,7 +150,7 @@ export const StockTransfers: React.FC = () => {
                 <div className="space-y-2.5">
                   <div className="flex items-center gap-2">
                     <span className="font-bold text-xs text-slate-900 bg-white/80 border border-white/80 px-2.5 py-0.5 rounded-lg shadow-xs">
-                      {item.transferNumber}
+                      {item.id}
                     </span>
                     <span className="text-[10px] text-slate-400 font-medium">
                       {new Date(item.requestedDate).toLocaleDateString()}
