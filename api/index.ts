@@ -4,32 +4,37 @@
 // function ("/api/(.*)" -> "/api"), preserving the original URL so the Express
 // app's own `/api/...` routes match.
 //
-// We wrap the Express app in an explicit (req, res) handler (rather than
-// `export default app`) because that is the most reliable shape for Vercel's
-// Node runtime in an ESM project. The app is created lazily and cached across
-// invocations; any initialization failure is surfaced as JSON so it is
-// diagnosable instead of an opaque FUNCTION_INVOCATION_FAILED.
+// IMPORTANT: the Express app is imported STATICALLY. Vercel's bundler (esbuild)
+// inlines statically-imported project files (app.ts, store.ts, initialData,
+// types) into this one function file. A *dynamic* import() is instead left as a
+// live runtime import to a path that does not exist in the deployment bundle
+// (ERR_MODULE_NOT_FOUND) — so it must not be used here.
+//
+// We also wrap the app in an explicit (req, res) handler rather than
+// `export default app`, which is the most reliable invocation shape for
+// Vercel's Node runtime under ESM. createApp() runs at module load but is
+// guarded so any init failure is surfaced as JSON instead of an opaque
+// FUNCTION_INVOCATION_FAILED.
 import "dotenv/config";
+import { createApp } from "../src/server/app";
 
-let appPromise: Promise<any> | null = null;
-function getApp(): Promise<any> {
-  if (!appPromise) {
-    appPromise = import("../src/server/app").then((m) => m.createApp());
-  }
-  return appPromise;
+let app: any = null;
+let loadError: unknown = null;
+try {
+  app = createApp();
+} catch (e) {
+  loadError = e;
 }
 
-export default async function handler(req: any, res: any) {
-  try {
-    const app = await getApp();
-    return app(req, res);
-  } catch (e: any) {
-    if (!res.headersSent) {
-      res.status(500).json({
-        error: "init_failed",
-        message: String(e?.message || e),
-        stack: String(e?.stack || "").split("\n").slice(0, 12),
-      });
-    }
+export default function handler(req: any, res: any) {
+  if (loadError) {
+    const err = loadError as any;
+    res.status(500).json({
+      error: "init_failed",
+      message: String(err?.message || err),
+      stack: String(err?.stack || "").split("\n").slice(0, 12),
+    });
+    return;
   }
+  return app(req, res);
 }
