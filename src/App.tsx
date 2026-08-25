@@ -9,6 +9,7 @@ import { StockTransfers } from './components/StockTransfers';
 import { PurchaseOrders } from './components/PurchaseOrders';
 import { CustomerDirectory } from './components/CustomerDirectory';
 import { TenantsManager } from './components/TenantsManager';
+import { UsersManager } from './components/UsersManager';
 import { LoginScreen } from './components/LoginScreen';
 import { AiAssistantModal } from './components/AiAssistantModal';
 import { ReceiptModal } from './components/ReceiptModal';
@@ -85,6 +86,7 @@ const AppContent: React.FC = () => {
         )}
 
         {activeTab === 'tenants' && <TenantsManager />}
+        {activeTab === 'users' && <UsersManager />}
       </main>
 
       {/* Footer */}
