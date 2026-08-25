@@ -27,13 +27,14 @@ import {
 import { Customer } from './types';
 
 const AppContent: React.FC = () => {
-  const { 
-    currentTenant, 
-    setCurrentTenant, 
-    tenants, 
-    notifications, 
-    removeNotification, 
-    setSelectedCustomer 
+  const {
+    currentTenant,
+    setCurrentTenant,
+    tenants,
+    notifications,
+    removeNotification,
+    setSelectedCustomer,
+    isAuthenticated
   } = usePharmacy();
 
   const [activeTab, setActiveTab] = useState<string>('network');
@@ -43,6 +44,8 @@ const AppContent: React.FC = () => {
     setSelectedCustomer(customer);
     setActiveTab('pos');
   };
+
+  if (!isAuthenticated) return <LoginScreen />;
 
   return (
     <div className="min-h-screen bg-[#eef2f3] text-[#1e293b] flex flex-col font-sans relative overflow-x-hidden selection:bg-cyan-500 selection:text-white">
