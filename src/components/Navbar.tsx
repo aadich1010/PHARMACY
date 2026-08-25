@@ -347,6 +347,11 @@ export const Navbar: React.FC<NavbarProps> = ({ activeTab, setActiveTab, onOpenN
             <span>Pharmacy Branches ({tenants.length})</span>
           </button>
         </div>
+
+        <div className="flex items-center gap-2 px-3 py-2 rounded-md text-sm font-medium text-white/90 hover:text-white hover:bg-white/10 transition-colors">
+          <Users className="w-4 h-4" />
+          <span>Users</span>
+        </div>
       </div>
     </header>
   );
