@@ -242,6 +242,12 @@ export const PharmacyProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   // --- Auth actions ---
   const login = useCallback(
     async (email: string, password: string): Promise<boolean> => {
+      // Mock bypass for demo / local testing
+      if (email === 'Superadmin@pharmacy.local' && password === 'P@k!stan@11421711') {
+        setCurrentUser({ id: 'usr-super', name: 'Super Admin', email, role: 'super_admin', tenantId: null, avatar: '' });
+        setIsAuthenticated(true);
+        return true;
+      }
       try {
         const { token, user } = await api.login(email, password);
         setAuthToken(token);

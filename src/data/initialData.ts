@@ -62,6 +62,14 @@ export const INITIAL_TENANTS: Tenant[] = [
 
 export const INITIAL_USERS: AppUser[] = [
   {
+    id: 'usr-super',
+    name: 'Super Admin',
+    email: 'Superadmin',
+    role: 'super_admin',
+    tenantId: null,
+    avatar: ''
+  },
+  {
     id: 'usr-1',
     name: 'Adeel Chaudhary (Network Owner)',
     email: 'adeelchaudhary101@gmail.com',
