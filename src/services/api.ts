@@ -1,21 +1,47 @@
-import { 
-  Tenant, 
-  Medicine, 
-  InventoryItem, 
-  InventoryBatch, 
-  Sale, 
-  StockTransfer, 
-  PurchaseOrder, 
-  Customer, 
-  Supplier, 
-  AppUser, 
-  NetworkAnalytics 
+import {
+  Tenant,
+  Medicine,
+  InventoryItem,
+  InventoryBatch,
+  Sale,
+  StockTransfer,
+  PurchaseOrder,
+  Customer,
+  Supplier,
+  AppUser,
+  NetworkAnalytics
 } from '../types';
+
+// --- Session token ---------------------------------------------------------
+// The signed token from POST /api/auth/login. Kept in localStorage so a page
+// refresh keeps the user logged in, and attached to every request below.
+const TOKEN_KEY = 'px_token';
+let authToken: string | null =
+  typeof localStorage !== 'undefined' ? localStorage.getItem(TOKEN_KEY) : null;
+
+export function setAuthToken(token: string): void {
+  authToken = token;
+  try {
+    localStorage.setItem(TOKEN_KEY, token);
+  } catch {}
+}
+
+export function clearAuthToken(): void {
+  authToken = null;
+  try {
+    localStorage.removeItem(TOKEN_KEY);
+  } catch {}
+}
+
+export function getAuthToken(): string | null {
+  return authToken;
+}
 
 async function fetchJSON<T>(url: string, options?: RequestInit): Promise<T> {
   const res = await fetch(url, {
     headers: {
       'Content-Type': 'application/json',
+      ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
       ...(options?.headers || {}),
     },
     ...options,
@@ -34,15 +60,34 @@ async function fetchJSON<T>(url: string, options?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  // Auth
+  login: (email: string, password: string) =>
+    fetchJSON<{ token: string; user: AppUser }>('/api/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ email, password }),
+    }),
+  getMe: () => fetchJSON<AppUser>('/api/auth/me'),
+
   // Tenants
   getTenants: () => fetchJSON<Tenant[]>('/api/tenants'),
-  createTenant: (data: Partial<Tenant>) => 
+  createTenant: (data: Partial<Tenant>) =>
     fetchJSON<Tenant>('/api/tenants', { method: 'POST', body: JSON.stringify(data) }),
-  updateTenant: (id: string, data: Partial<Tenant>) => 
+  updateTenant: (id: string, data: Partial<Tenant>) =>
     fetchJSON<Tenant>(`/api/tenants/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
 
   // Users
   getUsers: () => fetchJSON<AppUser[]>('/api/users'),
+  createUser: (data: {
+    name: string;
+    email: string;
+    role: AppUser['role'];
+    password: string;
+    tenantId?: string | null;
+  }) => fetchJSON<AppUser>('/api/users', { method: 'POST', body: JSON.stringify(data) }),
+  updateUser: (
+    id: string,
+    data: Partial<{ name: string; email: string; role: AppUser['role']; password: string }>
+  ) => fetchJSON<AppUser>(`/api/users/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
 
   // Medicines & Inventory
   getMedicines: () => fetchJSON<Medicine[]>('/api/medicines'),

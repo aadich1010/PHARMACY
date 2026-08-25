@@ -21,6 +21,7 @@ import {
   Supplier,
   AppUser,
 } from "../types";
+import { hashPassword, DEFAULT_BOOTSTRAP_PASSWORD } from "./auth";
 
 /**
  * A minimal table abstraction. The pharmacy dataset is small, so reads fetch the
@@ -170,6 +171,22 @@ async function seedSupabase(sb: SupabaseClient, store: Store): Promise<void> {
   await store.purchaseOrders.insertMany([...INITIAL_PURCHASE_ORDERS]);
 }
 
+/**
+ * Give every password-less user a hashed default password so existing/seeded
+ * accounts can log in on the very first deploy of the auth system. Idempotent:
+ * only users that have no passwordHash yet are touched, so it is safe to run on
+ * every cold start. The owner logs in with DEFAULT_BOOTSTRAP_PASSWORD, then
+ * changes it and creates real staff logins from the app.
+ */
+async function bootstrapAuth(store: Store): Promise<void> {
+  const users = await store.users.all();
+  for (const u of users) {
+    if (!u.passwordHash) {
+      await store.users.update(u.id, { passwordHash: hashPassword(DEFAULT_BOOTSTRAP_PASSWORD) });
+    }
+  }
+}
+
 function initStore(): Store {
   if (cachedStore) return cachedStore;
 
@@ -179,12 +196,16 @@ function initStore(): Store {
   if (url && key) {
     const sb = createClient(url, key, { auth: { persistSession: false } });
     const store = buildSupabaseStore(sb);
-    readyPromise = seedSupabase(sb, store);
+    // Seed a fresh DB, then backfill passwords. Because seedSupabase short-
+    // circuits once tenants exist, the already-live DB skips seeding but still
+    // gets its passwords backfilled on the next deploy.
+    readyPromise = seedSupabase(sb, store).then(() => bootstrapAuth(store));
     cachedStore = store;
     console.log("[store] Using Supabase persistence backend");
   } else {
-    cachedStore = buildMemoryStore();
-    readyPromise = Promise.resolve();
+    const store = buildMemoryStore();
+    cachedStore = store;
+    readyPromise = bootstrapAuth(store);
     console.log("[store] SUPABASE_URL not set — using in-memory backend (data resets on restart)");
   }
   return cachedStore;

@@ -12,7 +12,7 @@ import {
   NetworkAnalytics,
   InventoryBatch
 } from '../types';
-import { api } from '../services/api';
+import { api, setAuthToken, clearAuthToken, getAuthToken } from '../services/api';
 
 export interface PosCartItem {
   medicine: InventoryItem;
@@ -37,8 +37,11 @@ interface PharmacyContextType {
   currentTenant: Tenant | null; // null = Network HQ (All Branches view)
   setCurrentTenant: (tenant: Tenant | null) => void;
   users: AppUser[];
-  currentUser: AppUser;
-  setCurrentUser: (user: AppUser) => void;
+  currentUser: AppUser | null; // null until signed in
+  setCurrentUser: (user: AppUser | null) => void;
+  isAuthenticated: boolean;
+  login: (email: string, password: string) => Promise<boolean>;
+  logout: () => void;
 
   // Live Data
   inventory: InventoryItem[];
@@ -92,13 +95,8 @@ export const PharmacyProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const [tenants, setTenants] = useState<Tenant[]>([]);
   const [currentTenant, setCurrentTenant] = useState<Tenant | null>(null);
   const [users, setUsers] = useState<AppUser[]>([]);
-  const [currentUser, setCurrentUser] = useState<AppUser>({
-    id: 'usr-1',
-    name: 'Adeel Chaudhary (Network Owner)',
-    email: 'adeelchaudhary101@gmail.com',
-    role: 'super_admin',
-    tenantId: null,
-  });
+  // No user until a session is restored or a login succeeds.
+  const [currentUser, setCurrentUser] = useState<AppUser | null>(null);
 
   const [inventory, setInventory] = useState<InventoryItem[]>([]);
   const [sales, setSales] = useState<Sale[]>([]);
@@ -142,36 +140,56 @@ export const PharmacyProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     setIsAiModalOpen(true);
   };
 
-  // Main data fetcher
+  // Main data fetcher — role-aware so lower roles never call endpoints the
+  // server would reject with 403 (which would otherwise abort the whole sync).
   const refreshData = useCallback(async () => {
+    if (!currentUser) return;
     try {
-      const [
-        tenantsData,
-        usersData,
-        suppliersData,
-        customersData,
-        analyticsData,
-      ] = await Promise.all([
+      const isSuper = currentUser.role === 'super_admin';
+      const canListUsers = isSuper || currentUser.role === 'tenant_admin';
+
+      const [tenantsData, suppliersData, customersData] = await Promise.all([
         api.getTenants(),
-        api.getUsers(),
         api.getSuppliers(),
         api.getCustomers(),
-        api.getNetworkAnalytics(),
       ]);
-
       setTenants(tenantsData);
-      setUsers(usersData);
       setSuppliers(suppliersData);
       setCustomers(customersData);
-      setAnalytics(analyticsData);
 
-      // Default tenant selection if none selected
-      if (!currentTenant && tenantsData.length > 0) {
-        // Leave as null for super_admin to show network dashboard, or default to first tenant
+      // Staff list: only owner + manager may read it.
+      if (canListUsers) {
+        try {
+          setUsers(await api.getUsers());
+        } catch {
+          setUsers([]);
+        }
+      } else {
+        setUsers([]);
       }
 
-      // Fetch tenant-scoped or global data
-      const tId = currentTenant ? currentTenant.id : undefined;
+      // Network analytics dashboard is owner-only.
+      if (isSuper) {
+        try {
+          setAnalytics(await api.getNetworkAnalytics());
+        } catch {
+          setAnalytics(null);
+        }
+      } else {
+        setAnalytics(null);
+      }
+
+      // Non-owners are pinned to their own pharmacy branch.
+      if (!isSuper && currentUser.tenantId) {
+        const own = tenantsData.find((t) => t.id === currentUser.tenantId) || null;
+        if (own && (!currentTenant || currentTenant.id !== own.id)) {
+          setCurrentTenant(own);
+        }
+      }
+
+      // Owner: honour the selected branch (null = all branches). Others: server
+      // scopes to their tenant regardless of what we send.
+      const tId = isSuper ? (currentTenant ? currentTenant.id : undefined) : undefined;
       const [invData, salesData, transData, ordersData] = await Promise.all([
         api.getInventory({ tenantId: tId }),
         api.getSales(tId),
@@ -189,12 +207,70 @@ export const PharmacyProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     } finally {
       setIsLoading(false);
     }
-  }, [currentTenant, addNotification]);
+  }, [currentUser, currentTenant, addNotification]);
 
-  // Initial mount
+  // Restore an existing session on first load (token in localStorage).
   useEffect(() => {
-    refreshData();
-  }, [refreshData]);
+    let cancelled = false;
+    (async () => {
+      if (!getAuthToken()) {
+        setIsLoading(false);
+        return;
+      }
+      try {
+        const me = await api.getMe();
+        if (!cancelled) setCurrentUser(me);
+      } catch {
+        clearAuthToken();
+        if (!cancelled) {
+          setCurrentUser(null);
+          setIsLoading(false);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Load pharmacy data whenever we have an authenticated user (or the owner
+  // switches the active branch).
+  useEffect(() => {
+    if (currentUser) refreshData();
+  }, [currentUser, refreshData]);
+
+  // --- Auth actions ---
+  const login = useCallback(
+    async (email: string, password: string): Promise<boolean> => {
+      try {
+        const { token, user } = await api.login(email, password);
+        setAuthToken(token);
+        setIsLoading(true); // show spinner while first data load runs
+        setCurrentUser(user);
+        return true;
+      } catch (err: any) {
+        addNotification('error', 'Login Failed', err.message || 'Invalid email or password.');
+        return false;
+      }
+    },
+    [addNotification]
+  );
+
+  const logout = useCallback(() => {
+    clearAuthToken();
+    setCurrentUser(null);
+    setCurrentTenant(null);
+    setTenants([]);
+    setUsers([]);
+    setInventory([]);
+    setSales([]);
+    setTransfers([]);
+    setPurchaseOrders([]);
+    setCustomers([]);
+    setSuppliers([]);
+    setAnalytics(null);
+    setIsLoading(false);
+  }, []);
 
   // POS Cart Methods
   const addToCart = (item: InventoryItem, specificBatch?: InventoryBatch, qty: number = 1) => {
@@ -308,6 +384,10 @@ export const PharmacyProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   };
 
   const checkoutSale = async (): Promise<Sale | null> => {
+    if (!currentUser) {
+      addNotification('error', 'Session Expired', 'Please sign in again to process sales.');
+      return null;
+    }
     if (!currentTenant) {
       addNotification('error', 'Select Branch First', 'Please select a specific pharmacy branch to process sales.');
       return null;
@@ -391,6 +471,9 @@ export const PharmacyProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         users,
         currentUser,
         setCurrentUser,
+        isAuthenticated: !!currentUser,
+        login,
+        logout,
         inventory,
         sales,
         transfers,

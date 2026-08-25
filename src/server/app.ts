@@ -10,7 +10,9 @@ import {
   PurchaseOrder,
   Customer,
   NetworkAnalytics,
+  AppUser,
 } from "../types";
+import { hashPassword, verifyPassword, signToken, verifyToken, sanitizeUser } from "./auth";
 
 // Lazy Gemini client helper
 let aiClient: GoogleGenAI | null = null;
@@ -40,6 +42,41 @@ const ah =
       }
     });
   };
+
+// --- Auth / RBAC helpers ---------------------------------------------------
+// The auth guard attaches the resolved user to the request; these read it back.
+function getUser(req: Request): AppUser | undefined {
+  return (req as any).user as AppUser | undefined;
+}
+function isSuper(req: Request): boolean {
+  return getUser(req)?.role === "super_admin";
+}
+/** Owner, manager and pharmacist may touch stock; cashiers may not. */
+function canManageInventory(req: Request): boolean {
+  const r = getUser(req)?.role;
+  return r === "super_admin" || r === "tenant_admin" || r === "pharmacist";
+}
+/**
+ * Effective tenant id for a *read*. Non-super users are hard-locked to their own
+ * tenant regardless of any client-supplied value; the owner may filter by the
+ * requested id, or omit it for the consolidated all-branches view.
+ */
+function scopedTenantId(req: Request, requested?: unknown): string | undefined {
+  const u = getUser(req);
+  if (u && u.role !== "super_admin") return u.tenantId || undefined;
+  return typeof requested === "string" && requested ? requested : undefined;
+}
+/** May this user act on a row owned by `tenantId`? Owner: always. */
+function ownsTenant(req: Request, tenantId: string | null | undefined): boolean {
+  const u = getUser(req);
+  if (!u) return false;
+  if (u.role === "super_admin") return true;
+  return Boolean(tenantId) && u.tenantId === tenantId;
+}
+function forbid(res: Response, message = "You do not have permission to perform this action."): void {
+  res.status(403).json({ error: message });
+}
+const VALID_ROLES = ["super_admin", "tenant_admin", "pharmacist", "cashier"];
 
 /**
  * Builds the Express application exposing only the JSON `/api` surface.
@@ -73,6 +110,72 @@ export function createApp(): express.Express {
       });
   });
 
+  // --- Authentication --------------------------------------------------------
+  // Public login: exchange email + password for a signed session token.
+  app.post(
+    "/api/auth/login",
+    ah(async (req, res) => {
+      const email = String(req.body?.email || "").trim().toLowerCase();
+      const password = String(req.body?.password || "");
+      if (!email || !password) {
+        return res.status(400).json({ error: "Email and password are required." });
+      }
+      const users = await store.users.all();
+      const user = users.find((u) => u.email.toLowerCase() === email);
+      if (!user || !verifyPassword(password, user.passwordHash)) {
+        return res.status(401).json({ error: "Invalid email or password." });
+      }
+      const token = signToken({ sub: user.id, role: user.role, tenantId: user.tenantId });
+      res.json({ token, user: sanitizeUser(user) });
+    })
+  );
+
+  // Auth guard: every /api route below this line requires a valid Bearer token,
+  // except the public health check and the login endpoint above. Resolves the
+  // token to a live user record and attaches it as req.user.
+  app.use("/api", (req, res, next) => {
+    const p = req.path; // relative to the /api mount, e.g. "/sales"
+    if (req.method === "OPTIONS" || p === "/health" || p === "/auth/login") return next();
+
+    const header = req.headers.authorization || "";
+    const token = header.startsWith("Bearer ") ? header.slice(7).trim() : "";
+    let payload;
+    try {
+      payload = token ? verifyToken(token) : null;
+    } catch (err: any) {
+      // getSessionSecret throws in production when SESSION_SECRET is unset.
+      res.status(500).json({ error: err?.message || "Authentication configuration error." });
+      return;
+    }
+    if (!payload) {
+      res.status(401).json({ error: "Authentication required. Please sign in." });
+      return;
+    }
+    const userId = payload.sub;
+    store.users
+      .all()
+      .then((users) => {
+        const user = users.find((u) => u.id === userId);
+        if (!user) {
+          res.status(401).json({ error: "Your session is no longer valid. Please sign in again." });
+          return;
+        }
+        (req as any).user = user;
+        next();
+      })
+      .catch((err: any) => res.status(500).json({ error: err?.message || "Auth lookup failed." }));
+  });
+
+  // Current authenticated user (used by the client to restore a session).
+  app.get(
+    "/api/auth/me",
+    ah(async (req, res) => {
+      const u = getUser(req);
+      if (!u) return res.status(401).json({ error: "Not authenticated" });
+      res.json(sanitizeUser(u));
+    })
+  );
+
   // --- API Endpoints ---
 
   // 1. Health check
@@ -93,13 +196,17 @@ export function createApp(): express.Express {
   app.get(
     "/api/tenants",
     ah(async (req, res) => {
-      res.json(await store.tenants.all());
+      const all = await store.tenants.all();
+      if (isSuper(req)) return res.json(all);
+      const u = getUser(req);
+      res.json(all.filter((t) => t.id === u?.tenantId));
     })
   );
 
   app.post(
     "/api/tenants",
     ah(async (req, res) => {
+      if (!isSuper(req)) return forbid(res);
       const newTenant: Tenant = {
         ...req.body,
         id: `tenant-${Date.now()}`,
@@ -139,17 +246,131 @@ export function createApp(): express.Express {
   app.put(
     "/api/tenants/:id",
     ah(async (req, res) => {
+      if (!isSuper(req)) return forbid(res);
       const updated = await store.tenants.update(req.params.id, req.body);
       if (!updated) return res.status(404).json({ error: "Tenant not found" });
       res.json(updated);
     })
   );
 
-  // 3. Users & Auth Simulation
+  // 3. Users & Auth
+  // List users, scoped by role: owner sees everyone, a manager sees only their
+  // own pharmacy's staff, and lower roles may not list users at all. The
+  // password hash is always stripped before leaving the server.
   app.get(
     "/api/users",
     ah(async (req, res) => {
-      res.json(await store.users.all());
+      const actor = getUser(req);
+      if (!actor) return res.status(401).json({ error: "Not authenticated" });
+      const all = await store.users.all();
+      if (actor.role === "super_admin") {
+        return res.json(all.map(sanitizeUser));
+      }
+      if (actor.role === "tenant_admin") {
+        return res.json(all.filter((u) => u.tenantId === actor.tenantId).map(sanitizeUser));
+      }
+      return forbid(res);
+    })
+  );
+
+  // Create a staff login. Owner may create any role for any pharmacy; a manager
+  // may only create staff (pharmacist/cashier/manager) within their own pharmacy
+  // and never an owner.
+  app.post(
+    "/api/users",
+    ah(async (req, res) => {
+      const actor = getUser(req);
+      if (!actor) return res.status(401).json({ error: "Not authenticated" });
+      if (actor.role !== "super_admin" && actor.role !== "tenant_admin") return forbid(res);
+
+      const name = String(req.body?.name || "").trim();
+      const email = String(req.body?.email || "").trim().toLowerCase();
+      const role = String(req.body?.role || "") as AppUser["role"];
+      const password = String(req.body?.password || "");
+      let tenantId: string | null = req.body?.tenantId ?? null;
+
+      if (!name || !email || !password) {
+        return res.status(400).json({ error: "Name, email and password are required." });
+      }
+      if (!VALID_ROLES.includes(role)) {
+        return res.status(400).json({ error: "Invalid role." });
+      }
+
+      if (actor.role === "tenant_admin") {
+        // A manager is locked to their own pharmacy and cannot mint owners.
+        if (role === "super_admin") return forbid(res, "Managers cannot create an owner account.");
+        tenantId = actor.tenantId;
+      } else {
+        // Owner: super_admin has no pharmacy; every other role must have one.
+        tenantId = role === "super_admin" ? null : tenantId;
+        if (role !== "super_admin" && !tenantId) {
+          return res.status(400).json({ error: "Please select a pharmacy for this user." });
+        }
+      }
+
+      const users = await store.users.all();
+      if (users.some((u) => u.email.toLowerCase() === email)) {
+        return res.status(409).json({ error: "A user with this email already exists." });
+      }
+
+      const newUser: AppUser = {
+        id: `usr-${Date.now()}`,
+        name,
+        email,
+        role,
+        tenantId,
+        passwordHash: hashPassword(password),
+      };
+      await store.users.insert(newUser);
+      res.status(201).json(sanitizeUser(newUser));
+    })
+  );
+
+  // Update a staff login (name/role/pharmacy, and optionally reset the password).
+  app.put(
+    "/api/users/:id",
+    ah(async (req, res) => {
+      const actor = getUser(req);
+      if (!actor) return res.status(401).json({ error: "Not authenticated" });
+      if (actor.role !== "super_admin" && actor.role !== "tenant_admin") return forbid(res);
+
+      const users = await store.users.all();
+      const target = users.find((u) => u.id === req.params.id);
+      if (!target) return res.status(404).json({ error: "User not found" });
+
+      if (actor.role === "tenant_admin") {
+        if (target.tenantId !== actor.tenantId || target.role === "super_admin") {
+          return forbid(res, "You can only manage staff in your own pharmacy.");
+        }
+      }
+
+      const patch: Partial<AppUser> = {};
+      if (typeof req.body?.name === "string" && req.body.name.trim()) patch.name = req.body.name.trim();
+
+      if (typeof req.body?.role === "string") {
+        const role = req.body.role as AppUser["role"];
+        if (!VALID_ROLES.includes(role)) return res.status(400).json({ error: "Invalid role." });
+        if (actor.role === "tenant_admin" && role === "super_admin") {
+          return forbid(res, "Managers cannot assign the owner role.");
+        }
+        patch.role = role;
+      }
+
+      if (typeof req.body?.email === "string" && req.body.email.trim()) {
+        const email = req.body.email.trim().toLowerCase();
+        if (users.some((u) => u.id !== target.id && u.email.toLowerCase() === email)) {
+          return res.status(409).json({ error: "A user with this email already exists." });
+        }
+        patch.email = email;
+      }
+
+      if (typeof req.body?.password === "string" && req.body.password) {
+        patch.passwordHash = hashPassword(req.body.password);
+      }
+
+      const updated = await store.users.update(target.id, patch);
+      if (!updated) return res.status(404).json({ error: "User not found" });
+      res.json(sanitizeUser(updated));
     })
   );
 
@@ -164,6 +385,9 @@ export function createApp(): express.Express {
   app.post(
     "/api/medicines",
     ah(async (req, res) => {
+      // Medicines are a shared global catalogue; anyone who manages stock may add
+      // one, but cashiers may not.
+      if (!canManageInventory(req)) return forbid(res);
       const newMed: Medicine = {
         ...req.body,
         id: `med-${Date.now()}`,
@@ -179,7 +403,8 @@ export function createApp(): express.Express {
   app.get(
     "/api/inventory",
     ah(async (req, res) => {
-      const { tenantId, search, category, lowStockOnly, expiringSoonOnly } = req.query;
+      const { search, category, lowStockOnly, expiringSoonOnly } = req.query;
+      const tenantId = scopedTenantId(req, req.query.tenantId);
       const now = new Date();
       const ninetyDaysFuture = new Date(now.getTime() + 90 * 24 * 60 * 60 * 1000);
 
@@ -257,7 +482,8 @@ export function createApp(): express.Express {
   app.get(
     "/api/batches",
     ah(async (req, res) => {
-      const { tenantId, medicineId } = req.query;
+      const { medicineId } = req.query;
+      const tenantId = scopedTenantId(req, req.query.tenantId);
       let result = await store.batches.all();
       if (tenantId) result = result.filter((b) => b.tenantId === tenantId);
       if (medicineId) result = result.filter((b) => b.medicineId === medicineId);
@@ -268,8 +494,13 @@ export function createApp(): express.Express {
   app.post(
     "/api/batches",
     ah(async (req, res) => {
+      if (!canManageInventory(req)) return forbid(res);
+      const actor = getUser(req)!;
+      const tenantId = actor.role === "super_admin" ? req.body.tenantId : actor.tenantId;
+      if (!tenantId) return res.status(400).json({ error: "tenantId is required." });
       const newBatch: InventoryBatch = {
         ...req.body,
+        tenantId,
         id: `bat-${Date.now()}`,
         purchasePrice: Number(req.body.purchasePrice) || 0,
         sellingPrice: Number(req.body.sellingPrice) || 0,
@@ -285,9 +516,11 @@ export function createApp(): express.Express {
   app.put(
     "/api/batches/:id",
     ah(async (req, res) => {
+      if (!canManageInventory(req)) return forbid(res);
       const batches = await store.batches.all();
       const existing = batches.find((b) => b.id === req.params.id);
       if (!existing) return res.status(404).json({ error: "Batch not found" });
+      if (!ownsTenant(req, existing.tenantId)) return forbid(res);
       const patch: Partial<InventoryBatch> = {
         ...req.body,
         stockQuantity: Number(req.body.stockQuantity ?? existing.stockQuantity),
@@ -303,7 +536,7 @@ export function createApp(): express.Express {
   app.get(
     "/api/sales",
     ah(async (req, res) => {
-      const { tenantId } = req.query;
+      const tenantId = scopedTenantId(req, req.query.tenantId);
       let list = await store.sales.all();
       if (tenantId) list = list.filter((s) => s.tenantId === tenantId);
       list = [...list].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
@@ -314,16 +547,20 @@ export function createApp(): express.Express {
   app.post(
     "/api/sales",
     ah(async (req, res) => {
+      const actor = getUser(req)!;
       const saleData: Partial<Sale> = req.body;
-      if (!saleData.tenantId || !saleData.items || saleData.items.length === 0) {
+      // Non-owners can only ring up sales for their own pharmacy.
+      const tenantId = actor.role === "super_admin" ? saleData.tenantId : actor.tenantId;
+      if (!tenantId || !saleData.items || saleData.items.length === 0) {
         return res.status(400).json({ error: "Invalid sale payload: tenantId and items required" });
       }
+      saleData.tenantId = tenantId;
 
       // Validate stock for all items first, then apply deductions (avoids partial writes).
       const allBatches = await store.batches.all();
       const deductions: { id: string; newQty: number }[] = [];
       for (const item of saleData.items) {
-        const batch = allBatches.find((b) => b.id === item.batchId);
+        const batch = allBatches.find((b) => b.id === item.batchId && b.tenantId === tenantId);
         if (batch) {
           if (batch.stockQuantity < item.quantity) {
             return res.status(400).json({
@@ -374,8 +611,8 @@ export function createApp(): express.Express {
         grandTotal: Number(saleData.grandTotal) || 0,
         paymentMethod: saleData.paymentMethod || "Cash",
         insuranceDetails: saleData.insuranceDetails,
-        cashierId: saleData.cashierId || "usr-1",
-        cashierName: saleData.cashierName || "Dispensing Pharmacist",
+        cashierId: actor.id,
+        cashierName: actor.name,
         notes: saleData.notes,
         status: "completed",
       };
@@ -392,6 +629,7 @@ export function createApp(): express.Express {
       const sales = await store.sales.all();
       const sale = sales.find((s) => s.id === req.params.id);
       if (!sale) return res.status(404).json({ error: "Sale not found" });
+      if (!ownsTenant(req, sale.tenantId)) return forbid(res);
       if (sale.status === "refunded") {
         return res.status(400).json({ error: "Sale is already refunded" });
       }
@@ -414,7 +652,7 @@ export function createApp(): express.Express {
   app.get(
     "/api/transfers",
     ah(async (req, res) => {
-      const { tenantId } = req.query;
+      const tenantId = scopedTenantId(req, req.query.tenantId);
       let list = await store.transfers.all();
       if (tenantId) {
         list = list.filter((t) => t.fromTenantId === tenantId || t.toTenantId === tenantId);
@@ -429,7 +667,12 @@ export function createApp(): express.Express {
   app.post(
     "/api/transfers",
     ah(async (req, res) => {
-      const { fromTenantId, toTenantId, medicineId, quantity, requestedBy, notes } = req.body;
+      if (!canManageInventory(req)) return forbid(res);
+      const actor = getUser(req)!;
+      const { toTenantId, medicineId, quantity, notes } = req.body;
+      // A branch may only send stock *from* its own pharmacy; the owner may move
+      // stock from any branch.
+      const fromTenantId = actor.role === "super_admin" ? req.body.fromTenantId : actor.tenantId;
       const [tenants, medicines, allBatches] = await Promise.all([
         store.tenants.all(),
         store.medicines.all(),
@@ -469,7 +712,7 @@ export function createApp(): express.Express {
         quantity: Number(quantity),
         status: "pending",
         requestedDate: new Date().toISOString(),
-        requestedBy: requestedBy || "Branch Manager",
+        requestedBy: actor.name,
         notes,
       };
 
@@ -481,10 +724,15 @@ export function createApp(): express.Express {
   app.put(
     "/api/transfers/:id/status",
     ah(async (req, res) => {
+      if (!canManageInventory(req)) return forbid(res);
       const { status } = req.body;
       const transfers = await store.transfers.all();
       const transfer = transfers.find((t) => t.id === req.params.id);
       if (!transfer) return res.status(404).json({ error: "Transfer not found" });
+      // Either the sending or receiving branch (or the owner) may advance status.
+      if (!ownsTenant(req, transfer.fromTenantId) && !ownsTenant(req, transfer.toTenantId)) {
+        return forbid(res);
+      }
 
       const patch: Partial<StockTransfer> = { status };
 
@@ -542,7 +790,7 @@ export function createApp(): express.Express {
   app.get(
     "/api/orders",
     ah(async (req, res) => {
-      const { tenantId } = req.query;
+      const tenantId = scopedTenantId(req, req.query.tenantId);
       let list = await store.purchaseOrders.all();
       if (tenantId) list = list.filter((p) => p.tenantId === tenantId);
       list = [...list].sort(
@@ -555,7 +803,11 @@ export function createApp(): express.Express {
   app.post(
     "/api/orders",
     ah(async (req, res) => {
-      const { tenantId, supplierId, items, notes } = req.body;
+      if (!canManageInventory(req)) return forbid(res);
+      const actor = getUser(req)!;
+      const { supplierId, items, notes } = req.body;
+      const tenantId = actor.role === "super_admin" ? req.body.tenantId : actor.tenantId;
+      if (!tenantId) return res.status(400).json({ error: "tenantId is required." });
       const [suppliers, tenants, orders] = await Promise.all([
         store.suppliers.all(),
         store.tenants.all(),
@@ -595,9 +847,11 @@ export function createApp(): express.Express {
   app.put(
     "/api/orders/:id/receive",
     ah(async (req, res) => {
+      if (!canManageInventory(req)) return forbid(res);
       const orders = await store.purchaseOrders.all();
       const order = orders.find((p) => p.id === req.params.id);
       if (!order) return res.status(404).json({ error: "Order not found" });
+      if (!ownsTenant(req, order.tenantId)) return forbid(res);
       if (order.status === "received") {
         return res.status(400).json({ error: "Order is already marked as received" });
       }
@@ -663,6 +917,7 @@ export function createApp(): express.Express {
   app.get(
     "/api/analytics/network",
     ah(async (req, res) => {
+      if (!isSuper(req)) return forbid(res);
       const [tenants, medicines, allBatches, allSales] = await Promise.all([
         store.tenants.all(),
         store.medicines.all(),
@@ -976,14 +1231,16 @@ Return a JSON object:
   app.post(
     "/api/ai/smart-reorder-forecast",
     ah(async (req, res) => {
-      const { tenantId } = req.body;
+      const actor = getUser(req)!;
       const [tenants, medicines, allBatches, suppliers] = await Promise.all([
         store.tenants.all(),
         store.medicines.all(),
         store.batches.all(),
         store.suppliers.all(),
       ]);
-      const tenant = tenants.find((t) => t.id === tenantId) || tenants[0];
+      // Non-owners can only forecast for their own pharmacy.
+      const scopedId = actor.role === "super_admin" ? req.body?.tenantId : actor.tenantId;
+      const tenant = tenants.find((t) => t.id === scopedId) || tenants[0];
 
       const tenantBatches = allBatches.filter((b) => b.tenantId === tenant.id);
       const inventoryStatus = medicines.map((med) => {
@@ -1071,6 +1328,7 @@ Return a JSON object with:
   app.post(
     "/api/ai/executive-summary",
     ah(async (req, res) => {
+      if (!isSuper(req)) return forbid(res);
       const [tenants, allBatches, allSales, allTransfers] = await Promise.all([
         store.tenants.all(),
         store.batches.all(),

@@ -7,6 +7,7 @@ export interface AppUser {
   role: UserRole;
   tenantId: string | null; // null for super_admin
   avatar?: string;
+  passwordHash?: string; // server-only; stripped before sending to the client
 }
 
 export interface Tenant {
