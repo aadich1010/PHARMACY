@@ -9,7 +9,11 @@ import {
   ChevronDown,
   UserCheck,
   AlertTriangle,
-  Plus
+  Plus,
+  Users,
+  Database,
+  LogOut,
+  Lock
 } from 'lucide-react';
 import { usePharmacy } from '../context/PharmacyContext';
 import { UserRole } from '../types';
@@ -32,7 +36,8 @@ export const Navbar: React.FC<NavbarProps> = ({ activeTab, setActiveTab, onOpenN
     transfers,
     refreshData, 
     isLoading,
-    openAiModalWithTab 
+    openAiModalWithTab,
+    logout
   } = usePharmacy();
 
   const lowStockCount = inventory.filter((i) => i.isLowStock).length;
@@ -227,8 +232,44 @@ export const Navbar: React.FC<NavbarProps> = ({ activeTab, setActiveTab, onOpenN
                 >
                   <span>Cashier / Dispenser</span>
                 </button>
+                <button
+                  id="role-auditor"
+                  onClick={() => handleRoleChange('inventory_auditor')}
+                  className={`w-full px-3 py-1.5 text-left text-xs hover:bg-cyan-50 flex items-center justify-between ${
+                    currentUser.role === 'inventory_auditor' ? 'text-cyan-900 font-bold bg-cyan-100/50' : 'text-slate-700'
+                  }`}
+                >
+                  <span>Stock & Expiry Auditor</span>
+                </button>
+                <div className="border-t border-slate-100 my-1"></div>
+                <button
+                  id="btn-nav-users-dropdown"
+                  onClick={() => setActiveTab('users')}
+                  className="w-full px-3 py-1.5 text-left text-xs text-cyan-700 hover:bg-cyan-50 flex items-center gap-1.5 font-bold cursor-pointer"
+                >
+                  <Users className="w-3 h-3" />
+                  <span>Manage All Staff & Users</span>
+                </button>
+                <button
+                  id="btn-nav-logout"
+                  onClick={logout}
+                  className="w-full px-3 py-1.5 text-left text-xs text-rose-600 hover:bg-rose-50 flex items-center gap-1.5 font-bold cursor-pointer transition-colors"
+                >
+                  <LogOut className="w-3 h-3" />
+                  <span>Sign Out / Switch Account</span>
+                </button>
               </div>
             </div>
+
+            {/* Quick Logout Button */}
+            <button
+              id="btn-quick-logout"
+              onClick={logout}
+              title="Lock Session / Sign Out"
+              className="p-2 rounded-xl bg-white/60 hover:bg-rose-50 hover:border-rose-200 hover:text-rose-600 backdrop-blur-md border border-white/70 text-slate-600 transition-all shadow-xs cursor-pointer"
+            >
+              <LogOut className="w-4 h-4" />
+            </button>
 
           </div>
         </div>
@@ -344,7 +385,20 @@ export const Navbar: React.FC<NavbarProps> = ({ activeTab, setActiveTab, onOpenN
                 : 'text-slate-600 hover:text-cyan-900 hover:bg-white/50'
             }`}
           >
-            <span>Pharmacy Branches ({tenants.length})</span>
+            <span>Branches ({tenants.length})</span>
+          </button>
+
+          <button
+            id="tab-users"
+            onClick={() => setActiveTab('users')}
+            className={`px-3.5 py-1.5 rounded-xl transition-all flex items-center gap-1.5 whitespace-nowrap cursor-pointer ${
+              activeTab === 'users'
+                ? 'bg-cyan-600 text-white font-bold shadow-md shadow-cyan-600/20'
+                : 'text-slate-600 hover:text-cyan-900 hover:bg-white/50'
+            }`}
+          >
+            <Users className="w-3.5 h-3.5" />
+            <span>Staff & Users</span>
           </button>
         </div>
 
