@@ -16,7 +16,9 @@ import {
   Barcode,
   ThermometerSnowflake,
   ShieldCheck,
-  FileText
+  FileText,
+  FileSpreadsheet,
+  Download
 } from 'lucide-react';
 import { usePharmacy } from '../context/PharmacyContext';
 import { InventoryItem, MedicineCategory, DosageForm, InventoryBatch } from '../types';
@@ -188,6 +190,171 @@ export const InventoryManager: React.FC = () => {
     }
   };
 
+  const handleDownloadInventoryTemplate = () => {
+    const headers = [
+      'SKU',
+      'Brand Name',
+      'Generic Name',
+      'Category',
+      'Dosage Form',
+      'Strength',
+      'Manufacturer',
+      'Unit Pack Size',
+      'Batch Number',
+      'Manufacture Date (YYYY-MM-DD)',
+      'Expiry Date (YYYY-MM-DD)',
+      'Stock Quantity',
+      'Purchase Price',
+      'Selling Price',
+      'MRP',
+      'Rack Location',
+      'Requires Prescription (Yes/No)',
+      'Controlled Substance (Yes/No)',
+      'Storage Condition',
+      'Barcode'
+    ];
+
+    const sampleRows = [
+      [
+        'AUG-625-TAB',
+        'Augmentin 625mg',
+        'Amoxicillin + Clavulanic Acid',
+        'Antibiotics',
+        'Tablet',
+        '625mg',
+        'GSK Pakistan',
+        '14',
+        'AUG-2026-B1',
+        '2026-01-15',
+        '2028-01-15',
+        '120',
+        '380.00',
+        '450.00',
+        '460.00',
+        'Rack A-01',
+        'Yes',
+        'No',
+        'Store below 25°C',
+        '8964000123456'
+      ],
+      [
+        'PAN-500-TAB',
+        'Panadol 500mg',
+        'Paracetamol',
+        'Analgesics & Pain',
+        'Tablet',
+        '500mg',
+        'Haleon / GSK',
+        '200',
+        'PAN-2026-X9',
+        '2026-02-10',
+        '2029-02-10',
+        '450',
+        '28.00',
+        '35.00',
+        '35.00',
+        'Rack B-03',
+        'No',
+        'No',
+        'Room Temperature',
+        '8964000234567'
+      ],
+      [
+        'GLU-500-TAB',
+        'Glucophage 500mg',
+        'Metformin HCl',
+        'Diabetes & Endocrine',
+        'Tablet',
+        '500mg',
+        'Merck Serono',
+        '50',
+        'GLU-2026-M4',
+        '2026-03-01',
+        '2028-09-01',
+        '200',
+        '145.00',
+        '185.00',
+        '190.00',
+        'Rack C-02',
+        'Yes',
+        'No',
+        'Room Temperature',
+        '8964000345678'
+      ],
+      [
+        'LIP-20-TAB',
+        'Lipitor 20mg',
+        'Atorvastatin Calcium',
+        'Cardiovascular',
+        'Tablet',
+        '20mg',
+        'Pfizer Pharmaceuticals',
+        '30',
+        'LIP-2026-K7',
+        '2026-04-12',
+        '2028-10-12',
+        '85',
+        '540.00',
+        '650.00',
+        '660.00',
+        'Rack D-04',
+        'Yes',
+        'No',
+        'Room Temperature',
+        '8964000456789'
+      ],
+      [
+        'INS-GLAR-SOL',
+        'Lantus Solostar 100IU/ml',
+        'Insulin Glargine',
+        'Diabetes & Endocrine',
+        'Injection',
+        '100 IU/ml (3ml)',
+        'Sanofi-Aventis',
+        '5',
+        'LAN-2026-V2',
+        '2026-05-01',
+        '2027-11-01',
+        '30',
+        '2800.00',
+        '3250.00',
+        '3300.00',
+        'Fridge 01 (Cold Chain)',
+        'Yes',
+        'No',
+        'Cold Chain (2-8°C)',
+        '8964000567890'
+      ]
+    ];
+
+    const formatCSVRow = (row: (string | number)[]) => {
+      return row.map(val => {
+        const str = String(val ?? '');
+        if (str.includes(',') || str.includes('"') || str.includes('\n')) {
+          return `"${str.replace(/"/g, '""')}"`;
+        }
+        return str;
+      }).join(',');
+    };
+
+    const csvContent = [
+      formatCSVRow(headers),
+      ...sampleRows.map(r => formatCSVRow(r))
+    ].join('\n');
+
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.setAttribute('href', url);
+    link.setAttribute('download', `pharmacy_inventory_batch_template_${new Date().toISOString().split('T')[0]}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+
+    addNotification('success', 'Template Downloaded', 'Inventory batch CSV structure downloaded for offline preparation.');
+  };
+
   return (
     <div className="space-y-6 pb-12">
       {/* Header & Actions */}
@@ -209,6 +376,17 @@ export const InventoryManager: React.FC = () => {
         </div>
 
         <div className="flex items-center gap-2.5 flex-wrap">
+          {/* Download Inventory CSV Template */}
+          <button
+            id="btn-download-inventory-template"
+            onClick={handleDownloadInventoryTemplate}
+            className="flex items-center gap-1.5 px-4 py-2.5 rounded-2xl bg-white/80 hover:bg-white text-slate-700 hover:text-slate-900 border border-white/80 hover:border-cyan-300 font-bold text-xs shadow-xs transition-all cursor-pointer hover:shadow-md"
+            title="Download CSV template for offline batch data entry and catalog preparation"
+          >
+            <Download className="w-4 h-4 text-cyan-700" />
+            <span>Download Inventory Template</span>
+          </button>
+
           {/* Live Reorder Threshold Audit */}
           <button
             id="btn-run-threshold-audit"
@@ -823,6 +1001,22 @@ export const InventoryManager: React.FC = () => {
                 className="w-8 h-8 rounded-full bg-white/80 hover:bg-white flex items-center justify-center text-slate-500 hover:text-slate-800 text-sm cursor-pointer shadow-xs border border-white/70"
               >
                 ✕
+              </button>
+            </div>
+
+            {/* Offline CSV helper notice */}
+            <div className="flex items-center justify-between bg-cyan-500/10 border border-cyan-500/20 p-2.5 rounded-2xl text-[11px] text-cyan-950">
+              <div className="flex items-center gap-2">
+                <FileSpreadsheet className="w-4 h-4 text-cyan-700 shrink-0" />
+                <span>Preparing multiple items or batch stocks?</span>
+              </div>
+              <button
+                type="button"
+                id="btn-modal-download-template"
+                onClick={handleDownloadInventoryTemplate}
+                className="text-cyan-800 hover:text-cyan-950 font-bold underline cursor-pointer shrink-0"
+              >
+                Get CSV Template
               </button>
             </div>
 
