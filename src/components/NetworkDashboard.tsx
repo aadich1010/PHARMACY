@@ -15,6 +15,7 @@ import {
 } from 'lucide-react';
 import { usePharmacy } from '../context/PharmacyContext';
 import { ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip, CartesianGrid } from 'recharts';
+import { NetworkPerformanceCharts } from './NetworkPerformanceCharts';
 
 interface NetworkDashboardProps {
   onNavigateTab: (tab: string) => void;
@@ -229,6 +230,17 @@ export const NetworkDashboard: React.FC<NetworkDashboardProps> = ({ onNavigateTa
           ))}
         </div>
       </div>
+
+      {/* Comprehensive Recharts Multi-Branch Revenue & Inventory Analytics Visualizer */}
+      <NetworkPerformanceCharts
+        analytics={analytics}
+        tenants={tenants}
+        onNavigateBranch={(tenantId) => {
+          const fullTenant = tenants.find((t) => t.id === tenantId);
+          if (fullTenant) setCurrentTenant(fullTenant);
+          onNavigateTab('inventory');
+        }}
+      />
 
       {/* Multi-Tenant Comparison Cards */}
       <div>

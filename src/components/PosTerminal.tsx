@@ -17,11 +17,15 @@ import {
   Calendar,
   Wallet,
   Building,
-  Info
+  Info,
+  ScanLine,
+  QrCode,
+  Camera
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import { usePharmacy } from '../context/PharmacyContext';
 import { InventoryItem, MedicineCategory, Customer } from '../types';
+import { BarcodeScannerModal } from './BarcodeScannerModal';
 
 export const PosTerminal: React.FC = () => {
   const { 
@@ -58,6 +62,7 @@ export const PosTerminal: React.FC = () => {
   const [coPayPercent, setCoPayPercent] = useState<number>(20);
   const [insuranceProvider, setInsuranceProvider] = useState<string>('Jubilee Health Insurance');
   const [insuranceClaimNum, setInsuranceClaimNum] = useState<string>('CLM-2026-9901');
+  const [isBarcodeScannerOpen, setIsBarcodeScannerOpen] = useState(false);
 
   // Filter medicines
   const filteredMedicines = inventory.filter((item) => {
@@ -162,6 +167,18 @@ export const PosTerminal: React.FC = () => {
                   autoFocus
                 />
               </div>
+
+              {/* Scan Medicine Camera / Barcode Button */}
+              <button
+                id="btn-pos-scan-medicine"
+                type="button"
+                onClick={() => setIsBarcodeScannerOpen(true)}
+                className="flex items-center gap-1.5 px-3.5 py-2.5 rounded-2xl bg-gradient-to-r from-teal-600 to-cyan-600 hover:from-teal-500 hover:to-cyan-500 text-white text-xs font-extrabold transition-all cursor-pointer shrink-0 shadow-md shadow-cyan-600/20 hover:scale-[1.02]"
+                title="Scan medicine with camera or barcode reader"
+              >
+                <ScanLine className="w-3.5 h-3.5 text-cyan-200" />
+                <span>Scan Medicine</span>
+              </button>
 
               {/* AI Prescription OCR / Reader button */}
               <button
@@ -542,6 +559,18 @@ export const PosTerminal: React.FC = () => {
           </div>
         </div>
       </div>
+
+      {/* Barcode & QR Code Scanner Modal */}
+      <BarcodeScannerModal
+        isOpen={isBarcodeScannerOpen}
+        onClose={() => setIsBarcodeScannerOpen(false)}
+        inventory={inventory}
+        currency={currentTenant?.currency || 'PKR'}
+        onItemScanned={(item, batch, qty) => {
+          addToCart(item, batch, qty || 1);
+        }}
+        addNotification={addNotification}
+      />
     </div>
   );
 };

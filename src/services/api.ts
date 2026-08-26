@@ -154,8 +154,13 @@ export const api = {
   createCustomer: (data: Partial<Customer>) =>
     fetchJSON<Customer>('/api/customers', { method: 'POST', body: JSON.stringify(data) }),
 
-  // Analytics
+  // Analytics & Reorder Checks
   getNetworkAnalytics: () => fetchJSON<NetworkAnalytics>('/api/analytics/network'),
+  checkReorderThresholds: (tenantId?: string) => {
+    const query = new URLSearchParams();
+    if (tenantId) query.set('tenantId', tenantId);
+    return fetchJSON<any>(`/api/inventory/reorder-check?${query.toString()}`);
+  },
 
   // AI Services (Gemini 2.5 Flash)
   analyzePrescription: (payload: { text: string; tenantId?: string; patientConditions?: string[]; patientAllergies?: string[] }) =>

@@ -35,3 +35,92 @@ body {
   color: #1e293b;
   min-height: 100vh;
 }
+
+/* ==========================================================================
+   Thermal Receipt Print-Only Media Query
+   ========================================================================== */
+@media print {
+  /* Hide every normal screen element */
+  body * {
+    visibility: hidden !important;
+  }
+
+  /* Reset page & document backgrounds */
+  html, body {
+    background: #ffffff !important;
+    background-color: #ffffff !important;
+    color: #000000 !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    min-height: auto !important;
+    width: 100% !important;
+  }
+
+  /* Expose printable receipt wrapper and all its children */
+  #printable-receipt-wrapper,
+  #printable-receipt-wrapper * {
+    visibility: visible !important;
+  }
+
+  /* Position printable receipt cleanly at the top of the print canvas */
+  #printable-receipt-wrapper {
+    position: absolute !important;
+    left: 0 !important;
+    top: 0 !important;
+    width: 100% !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    background: transparent !important;
+    display: flex !important;
+    justify-content: center !important;
+    align-items: flex-start !important;
+    z-index: 999999 !important;
+  }
+
+  #printable-receipt {
+    width: 80mm !important;
+    max-width: 80mm !important;
+    margin: 0 auto !important;
+    padding: 4mm 3mm !important;
+    background-color: #ffffff !important;
+    color: #000000 !important;
+    font-family: 'Courier New', Courier, monospace, ui-monospace, SFMono-Regular, monospace !important;
+    font-size: 11px !important;
+    line-height: 1.35 !important;
+    box-shadow: none !important;
+    border: none !important;
+    border-radius: 0 !important;
+  }
+
+  /* Force borders to solid or dashed thermal black */
+  #printable-receipt .print-border-dashed {
+    border-style: dashed !important;
+    border-color: #000000 !important;
+  }
+
+  #printable-receipt .print-border-solid {
+    border-style: solid !important;
+    border-color: #000000 !important;
+  }
+
+  #printable-receipt .print-text-black {
+    color: #000000 !important;
+  }
+
+  #printable-receipt .print-bg-transparent {
+    background-color: transparent !important;
+    background: none !important;
+  }
+
+  /* Elements to explicitly hide when printing */
+  .no-print,
+  .no-print * {
+    display: none !important;
+    visibility: hidden !important;
+  }
+
+  @page {
+    size: 80mm auto;
+    margin: 0;
+  }
+}

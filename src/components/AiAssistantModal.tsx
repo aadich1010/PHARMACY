@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { 
   Sparkles, 
   FileText, 
@@ -12,7 +12,15 @@ import {
   ArrowRight,
   RefreshCw,
   Zap,
-  Info
+  Info,
+  Mic,
+  MicOff,
+  Volume2,
+  VolumeX,
+  Languages,
+  Trash2,
+  Check,
+  Radio
 } from 'lucide-react';
 import { usePharmacy } from '../context/PharmacyContext';
 import { api } from '../services/api';
@@ -38,6 +46,16 @@ export const AiAssistantModal: React.FC = () => {
   const [isParsingRx, setIsParsingRx] = useState(false);
   const [parsedRxResult, setParsedRxResult] = useState<any>(null);
 
+  // Web Speech API Voice Dictation State
+  const [isListening, setIsListening] = useState(false);
+  const [interimTranscript, setInterimTranscript] = useState('');
+  const [speechLanguage, setSpeechLanguage] = useState<'en-US' | 'en-GB' | 'ur-PK'>('en-US');
+  const [isSpeechSupported, setIsSpeechSupported] = useState(true);
+  const [dictationMode, setDictationMode] = useState<'append' | 'replace'>('append');
+  const [isSpeakingAdvice, setIsSpeakingAdvice] = useState(false);
+  const recognitionRef = useRef<any>(null);
+  const baseTextBeforeDictationRef = useRef<string>('');
+
   // Interaction check state
   const [selectedMedIds, setSelectedMedIds] = useState<string[]>(['med-1', 'med-3']);
   const [patientAge, setPatientAge] = useState<number>(55);
@@ -53,6 +71,161 @@ export const AiAssistantModal: React.FC = () => {
   // Executive summary state
   const [isGeneratingSummary, setIsGeneratingSummary] = useState(false);
   const [summaryResult, setSummaryResult] = useState<any>(null);
+
+  // Check Web Speech API browser compatibility on mount
+  useEffect(() => {
+    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      setIsSpeechSupported(false);
+    }
+  }, []);
+
+  // Cleanup speech recognition and synthesis on unmount or modal close
+  useEffect(() => {
+    return () => {
+      if (recognitionRef.current) {
+        try {
+          recognitionRef.current.stop();
+        } catch (e) {
+          // ignore
+        }
+      }
+      if ('speechSynthesis' in window) {
+        window.speechSynthesis.cancel();
+      }
+    };
+  }, []);
+
+  // Stop listening if modal closes or tab changes
+  useEffect(() => {
+    if (!isAiModalOpen || activeTab !== 'prescription') {
+      if (isListening && recognitionRef.current) {
+        try {
+          recognitionRef.current.stop();
+        } catch (e) {
+          // ignore
+        }
+        setIsListening(false);
+        setInterimTranscript('');
+      }
+      if ('speechSynthesis' in window) {
+        window.speechSynthesis.cancel();
+        setIsSpeakingAdvice(false);
+      }
+    }
+  }, [isAiModalOpen, activeTab, isListening]);
+
+  // Voice Dictation Toggle Handler
+  const toggleSpeechRecognition = () => {
+    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    
+    if (!SpeechRecognition) {
+      addNotification('warning', 'Speech Recognition Not Supported', 'Your browser does not support the Web Speech API. Please use Chrome, Edge, or Safari.');
+      setIsSpeechSupported(false);
+      return;
+    }
+
+    if (isListening) {
+      if (recognitionRef.current) {
+        try {
+          recognitionRef.current.stop();
+        } catch (e) {
+          // ignore
+        }
+      }
+      setIsListening(false);
+      setInterimTranscript('');
+      addNotification('info', 'Dictation Stopped', 'Prescription text captured.');
+      return;
+    }
+
+    try {
+      const recognition = new SpeechRecognition();
+      recognition.continuous = true;
+      recognition.interimResults = true;
+      recognition.lang = speechLanguage;
+      recognitionRef.current = recognition;
+
+      baseTextBeforeDictationRef.current = dictationMode === 'replace' ? '' : prescriptionText;
+
+      recognition.onstart = () => {
+        setIsListening(true);
+        setInterimTranscript('');
+        addNotification('info', 'Voice Dictation Active', `Listening in ${speechLanguage}. Speak prescription details clearly...`);
+      };
+
+      recognition.onresult = (event: any) => {
+        let currentInterim = '';
+        let finalChunk = '';
+
+        for (let i = event.resultIndex; i < event.results.length; i++) {
+          const transcript = event.results[i][0].transcript;
+          if (event.results[i].isFinal) {
+            finalChunk += transcript + ' ';
+          } else {
+            currentInterim += transcript;
+          }
+        }
+
+        setInterimTranscript(currentInterim);
+
+        if (finalChunk) {
+          setPrescriptionText((prev) => {
+            const base = dictationMode === 'replace' && baseTextBeforeDictationRef.current === '' 
+              ? '' 
+              : prev.trim() ? prev.trim() + '\n' : '';
+            return base + finalChunk.trim();
+          });
+        }
+      };
+
+      recognition.onerror = (event: any) => {
+        console.warn('Speech Recognition Error:', event.error);
+        if (event.error === 'not-allowed') {
+          addNotification('error', 'Microphone Access Denied', 'Please grant microphone permissions in your browser settings.');
+        } else if (event.error !== 'no-speech') {
+          addNotification('warning', 'Voice Dictation Error', `Speech error: ${event.error}`);
+        }
+        setIsListening(false);
+        setInterimTranscript('');
+      };
+
+      recognition.onend = () => {
+        setIsListening(false);
+        setInterimTranscript('');
+      };
+
+      recognition.start();
+    } catch (err: any) {
+      console.error('Failed to initialize Speech Recognition:', err);
+      addNotification('error', 'Dictation Error', err.message || 'Could not start voice recognition.');
+      setIsListening(false);
+    }
+  };
+
+  // Text to Speech Readout for Clinical Warnings / Guidance
+  const handleSpeakAdvice = (textToSpeak: string) => {
+    if (!('speechSynthesis' in window)) {
+      addNotification('warning', 'TTS Not Supported', 'Text-to-speech is not supported in this browser.');
+      return;
+    }
+
+    if (isSpeakingAdvice) {
+      window.speechSynthesis.cancel();
+      setIsSpeakingAdvice(false);
+      return;
+    }
+
+    window.speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(textToSpeak);
+    utterance.rate = 0.95;
+    utterance.pitch = 1.0;
+    utterance.onend = () => setIsSpeakingAdvice(false);
+    utterance.onerror = () => setIsSpeakingAdvice(false);
+
+    setIsSpeakingAdvice(true);
+    window.speechSynthesis.speak(utterance);
+  };
 
   if (!isAiModalOpen) return null;
 
@@ -140,6 +313,13 @@ export const AiAssistantModal: React.FC = () => {
     setIsAiModalOpen(false);
   };
 
+  const handleLoadSampleRx = () => {
+    setPrescriptionText(
+      `Rx:\nPatient: Imran Farooq (Age 52)\nDiagnosis: Community-acquired pneumonia & Type 2 Diabetes\n1. Augmentin 625mg - 1 tab TID x 7 days\n2. Glucophage 500mg - 1 tab BD with meals\n3. Panadol 500mg - 1-2 tabs PRN for fever\nDr. M. Haris (FCPS)`
+    );
+    addNotification('info', 'Sample Rx Loaded', 'Standard clinical prescription template populated.');
+  };
+
   return (
     <div className="fixed inset-0 bg-slate-950/40 backdrop-blur-md flex items-center justify-center p-3 sm:p-6 z-50 animate-in fade-in">
       <div className="bg-white/85 backdrop-blur-2xl rounded-3xl max-w-4xl w-full border border-white/70 shadow-2xl overflow-hidden flex flex-col max-h-[92vh]">
@@ -158,7 +338,7 @@ export const AiAssistantModal: React.FC = () => {
                 </span>
               </div>
               <p className="text-xs text-cyan-100/70">
-                Clinical decision support, prescription parsing, pharmacological safety & multi-tenant forecasting
+                Clinical decision support, voice-powered prescription dictation, pharmacological safety & forecasting
               </p>
             </div>
           </div>
@@ -184,7 +364,7 @@ export const AiAssistantModal: React.FC = () => {
             }`}
           >
             <FileText className="w-3.5 h-3.5 text-cyan-400" />
-            <span>Prescription Parser & OCR</span>
+            <span>Prescription Parser & Voice Dictation</span>
           </button>
 
           <button
@@ -230,34 +410,161 @@ export const AiAssistantModal: React.FC = () => {
         {/* Tab Content Body */}
         <div className="p-6 overflow-y-auto flex-1 text-xs space-y-4">
           
-          {/* TAB 1: Prescription Parser */}
+          {/* TAB 1: Prescription Parser & Web Speech Dictation */}
           {activeTab === 'prescription' && (
             <div className="space-y-4">
               <div className="bg-cyan-500/10 p-4 rounded-2xl border border-cyan-500/20 flex items-start gap-3 shadow-xs">
                 <Info className="w-4 h-4 text-cyan-800 shrink-0 mt-0.5" />
-                <div className="text-cyan-950 font-medium">
-                  <strong className="font-bold text-cyan-900">Clinical NLP Prescription Parser:</strong> Paste handwritten transcription, digital doctor notes, or patient clinical charts. The AI extracts prescribed medicines, maps them directly to your pharmacy catalog, checks dosage safety, and enables 1-click cart loading.
+                <div className="text-cyan-950 font-medium leading-relaxed">
+                  <strong className="font-bold text-cyan-900">Clinical NLP & Voice Dictation Engine:</strong> Pharmacists can use their microphone to dictate doctor orders hands-free, or paste prescription text. The AI extracts medications, strengths, dosages, cross-references your branch inventory in real time, and enables 1-click dispensing.
                 </div>
               </div>
 
+              {/* Dictation Control & Toolbar */}
+              <div className="bg-gradient-to-r from-slate-900/95 via-cyan-950/95 to-slate-900/95 p-3.5 rounded-2xl border border-cyan-500/30 text-white shadow-lg flex flex-wrap items-center justify-between gap-3">
+                <div className="flex items-center gap-3">
+                  {/* Big Voice Dictation Toggle Button */}
+                  <button
+                    id="btn-voice-dictate-rx"
+                    type="button"
+                    onClick={toggleSpeechRecognition}
+                    className={`px-4 py-2.5 rounded-xl font-bold text-xs flex items-center gap-2.5 transition-all cursor-pointer shadow-md ${
+                      isListening
+                        ? 'bg-rose-600 hover:bg-rose-700 text-white animate-pulse shadow-rose-600/30 ring-2 ring-rose-400/50'
+                        : 'bg-gradient-to-r from-cyan-500 to-teal-500 hover:from-cyan-400 hover:to-teal-400 text-slate-950 shadow-cyan-500/20 font-extrabold'
+                    }`}
+                  >
+                    {isListening ? (
+                      <>
+                        <MicOff className="w-4 h-4 text-white" />
+                        <span>Stop Voice Dictation</span>
+                      </>
+                    ) : (
+                      <>
+                        <Mic className="w-4 h-4 text-slate-950" />
+                        <span>Dictate Prescription (Microphone)</span>
+                      </>
+                    )}
+                  </button>
+
+                  {/* Active Audio Waveform & Status Indicator */}
+                  {isListening ? (
+                    <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-rose-500/20 border border-rose-500/30 text-rose-200">
+                      <span className="relative flex h-2.5 w-2.5">
+                        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-rose-400 opacity-75"></span>
+                        <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-rose-500"></span>
+                      </span>
+                      <span className="font-bold text-[11px]">Recording Voice...</span>
+                      <div className="flex items-end gap-0.5 h-3 ml-1">
+                        <span className="w-0.5 h-2 bg-rose-400 animate-pulse"></span>
+                        <span className="w-0.5 h-3 bg-rose-300 animate-pulse [animation-delay:150ms]"></span>
+                        <span className="w-0.5 h-1.5 bg-rose-400 animate-pulse [animation-delay:300ms]"></span>
+                        <span className="w-0.5 h-2.5 bg-rose-300 animate-pulse [animation-delay:450ms]"></span>
+                      </div>
+                    </div>
+                  ) : (
+                    <span className="text-[11px] text-cyan-200/70 hidden sm:inline-flex items-center gap-1.5 font-medium">
+                      <Radio className="w-3.5 h-3.5 text-cyan-400" />
+                      {isSpeechSupported ? 'Web Speech API Ready' : 'Browser Speech Unsupported'}
+                    </span>
+                  )}
+                </div>
+
+                {/* Dictation Settings & Helper Controls */}
+                <div className="flex items-center gap-2 flex-wrap">
+                  {/* Language Selector */}
+                  <div className="flex items-center gap-1 bg-white/10 px-2.5 py-1 rounded-xl border border-white/15 text-[11px]">
+                    <Languages className="w-3 h-3 text-cyan-300" />
+                    <select
+                      id="select-speech-language"
+                      value={speechLanguage}
+                      onChange={(e) => setSpeechLanguage(e.target.value as any)}
+                      disabled={isListening}
+                      className="bg-transparent text-cyan-100 font-semibold focus:outline-none cursor-pointer text-[11px]"
+                    >
+                      <option value="en-US" className="bg-slate-900 text-white">English (US)</option>
+                      <option value="en-GB" className="bg-slate-900 text-white">English (UK)</option>
+                      <option value="ur-PK" className="bg-slate-900 text-white">Urdu / Mixed (PK)</option>
+                    </select>
+                  </div>
+
+                  {/* Mode: Append vs Replace */}
+                  <div className="flex items-center gap-1 bg-white/10 px-2 py-1 rounded-xl border border-white/15 text-[11px]">
+                    <button
+                      type="button"
+                      onClick={() => setDictationMode(dictationMode === 'append' ? 'replace' : 'append')}
+                      className="text-cyan-200 hover:text-white font-medium transition-colors cursor-pointer"
+                      title="Toggle between appending dictated text or replacing current content"
+                    >
+                      Mode: <span className="font-bold text-cyan-300 uppercase">{dictationMode}</span>
+                    </button>
+                  </div>
+
+                  {/* Clear Button */}
+                  <button
+                    type="button"
+                    onClick={() => setPrescriptionText('')}
+                    className="p-1.5 rounded-xl bg-white/10 hover:bg-rose-500/30 text-white/70 hover:text-white transition-colors cursor-pointer border border-white/15"
+                    title="Clear Prescription Text"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </button>
+
+                  {/* Sample Rx Button */}
+                  <button
+                    type="button"
+                    onClick={handleLoadSampleRx}
+                    className="px-2.5 py-1 rounded-xl bg-white/10 hover:bg-white/20 text-cyan-200 hover:text-white font-semibold text-[11px] transition-colors cursor-pointer border border-white/15"
+                  >
+                    Load Sample Rx
+                  </button>
+                </div>
+              </div>
+
+              {/* Real-time Interim Voice Transcript Banner */}
+              {isListening && interimTranscript && (
+                <div className="p-3 rounded-2xl bg-cyan-500/15 border border-cyan-400/30 text-cyan-950 animate-in fade-in flex items-center gap-2">
+                  <Mic className="w-4 h-4 text-cyan-700 animate-pulse shrink-0" />
+                  <div className="text-xs">
+                    <span className="text-cyan-800 font-bold mr-1">Hearing:</span>
+                    <span className="italic font-medium text-slate-800">"{interimTranscript}"</span>
+                  </div>
+                </div>
+              )}
+
+              {/* Prescription Textarea */}
               <div>
-                <label className="font-bold text-slate-800 block mb-1.5">Doctor Prescription Text / Rx Notes</label>
+                <div className="flex items-center justify-between mb-1.5">
+                  <label className="font-bold text-slate-800 block">Doctor Prescription Text / Rx Notes</label>
+                  <span className="text-[11px] text-slate-500 font-medium">
+                    {prescriptionText.length} characters • {prescriptionText.split('\n').filter(Boolean).length} lines
+                  </span>
+                </div>
                 <textarea
                   id="textarea-rx-input"
-                  rows={4}
+                  rows={5}
                   value={prescriptionText}
                   onChange={(e) => setPrescriptionText(e.target.value)}
-                  placeholder="Paste prescription text here..."
-                  className="w-full p-3.5 rounded-2xl border border-white/80 font-mono text-xs focus:ring-2 focus:ring-cyan-500/20 focus:border-cyan-500 bg-white/70 shadow-inner"
+                  placeholder="Dictate using microphone or paste prescription text here..."
+                  className={`w-full p-3.5 rounded-2xl border font-mono text-xs focus:ring-2 focus:ring-cyan-500/20 focus:border-cyan-500 bg-white/70 shadow-inner transition-all ${
+                    isListening ? 'border-cyan-400/80 ring-2 ring-cyan-500/20' : 'border-white/80'
+                  }`}
                 />
               </div>
 
-              <div className="flex items-center justify-between flex-wrap gap-2">
+              {/* Voice Dictation Speech Guidance Tip */}
+              <div className="bg-slate-100/80 p-2.5 rounded-xl border border-slate-200 text-[11px] text-slate-600 flex items-center justify-between">
+                <span>
+                  💡 <strong>Voice Dictation Tip:</strong> Say <em className="text-cyan-950 font-semibold">"Patient Ali Khan, diagnosis hypertension, 1. Amlodipine 5mg once daily x 30 days"</em> for automatic clinical parsing.
+                </span>
+              </div>
+
+              <div className="flex items-center justify-between flex-wrap gap-2 pt-1">
                 <button
                   id="btn-run-parse-rx"
                   onClick={handleParsePrescription}
-                  disabled={isParsingRx}
-                  className="px-5 py-2.5 rounded-2xl bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs shadow-md shadow-slate-900/10 transition-all flex items-center gap-2 cursor-pointer"
+                  disabled={isParsingRx || !prescriptionText.trim()}
+                  className="px-5 py-2.5 rounded-2xl bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs shadow-md shadow-slate-900/10 transition-all flex items-center gap-2 cursor-pointer disabled:opacity-50"
                 >
                   {isParsingRx ? <Loader2 className="w-4 h-4 animate-spin text-cyan-400" /> : <Sparkles className="w-4 h-4 text-cyan-400" />}
                   <span>{isParsingRx ? 'Analyzing Clinical Text...' : 'Analyze & Map Prescription'}</span>
@@ -335,7 +642,17 @@ export const AiAssistantModal: React.FC = () => {
                   {/* Clinical Warnings */}
                   {parsedRxResult.clinicalWarnings?.length > 0 && (
                     <div className="bg-rose-500/15 p-3.5 rounded-2xl border border-rose-500/30 text-rose-950 text-xs font-medium space-y-1">
-                      <strong className="font-bold text-rose-900 block">Clinical Warnings:</strong>
+                      <div className="flex items-center justify-between">
+                        <strong className="font-bold text-rose-900 block">Clinical Warnings:</strong>
+                        <button
+                          type="button"
+                          onClick={() => handleSpeakAdvice(parsedRxResult.clinicalWarnings.join('. '))}
+                          className="px-2.5 py-1 rounded-lg bg-rose-900 text-white font-bold text-[10px] flex items-center gap-1 hover:bg-rose-800 transition-colors cursor-pointer"
+                        >
+                          {isSpeakingAdvice ? <VolumeX className="w-3 h-3" /> : <Volume2 className="w-3 h-3" />}
+                          <span>{isSpeakingAdvice ? 'Stop Reading' : 'Audio Readout'}</span>
+                        </button>
+                      </div>
                       <ul className="list-disc list-inside space-y-0.5">
                         {parsedRxResult.clinicalWarnings.map((w: string, i: number) => (
                           <li key={i}>{w}</li>
@@ -655,3 +972,4 @@ export const AiAssistantModal: React.FC = () => {
     </div>
   );
 };
+

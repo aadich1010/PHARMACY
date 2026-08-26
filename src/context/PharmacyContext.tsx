@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
 import { 
   Tenant, 
   AppUser, 
@@ -13,6 +13,13 @@ import {
   InventoryBatch
 } from '../types';
 import { api, setAuthToken, clearAuthToken, getAuthToken } from '../services/api';
+import {
+  ReorderReport,
+  ReorderItemRecommendation,
+  evaluateInventoryReorderThresholds,
+  dispatchInventoryReorderAlerts,
+  buildPurchaseOrderFromReorder
+} from '../services/inventoryReorderService';
 
 export interface PosCartItem {
   medicine: InventoryItem;
@@ -53,6 +60,13 @@ interface PharmacyContextType {
   analytics: NetworkAnalytics | null;
   isLoading: boolean;
   refreshData: () => Promise<void>;
+
+  // Inventory Reorder Service & Threshold Alerts
+  reorderReport: ReorderReport | null;
+  isReorderAlertOpen: boolean;
+  setIsReorderAlertOpen: (open: boolean) => void;
+  checkReorderStatus: (options?: { forceNotify?: boolean }) => ReorderReport | null;
+  createReorderPurchaseOrder: (recommendations?: ReorderItemRecommendation[]) => Promise<PurchaseOrder | null>;
 
   // POS State
   cart: PosCartItem[];
@@ -106,6 +120,11 @@ export const PharmacyProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const [suppliers, setSuppliers] = useState<Supplier[]>([]);
   const [analytics, setAnalytics] = useState<NetworkAnalytics | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+
+  // Inventory Reorder Service State
+  const [reorderReport, setReorderReport] = useState<ReorderReport | null>(null);
+  const [isReorderAlertOpen, setIsReorderAlertOpen] = useState(false);
+  const isInitialLoadRef = useRef(true);
 
   // POS State
   const [cart, setCart] = useState<PosCartItem[]>([]);
@@ -245,7 +264,6 @@ export const PharmacyProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       // Mock bypass for demo / local testing
       if (email === 'Superadmin@pharmacy.local' && password === 'P@k!stan@11421711') {
         setCurrentUser({ id: 'usr-super', name: 'Super Admin', email, role: 'super_admin', tenantId: null, avatar: '' });
-        setIsAuthenticated(true);
         return true;
       }
       try {
@@ -277,6 +295,71 @@ export const PharmacyProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     setAnalytics(null);
     setIsLoading(false);
   }, []);
+
+  // Run inventory reorder threshold checks
+  const checkReorderStatus = useCallback((options?: { forceNotify?: boolean }): ReorderReport | null => {
+    if (inventory.length === 0) return null;
+    const report = evaluateInventoryReorderThresholds(inventory, currentTenant, suppliers);
+    setReorderReport(report);
+
+    if (report.recommendations.length > 0) {
+      dispatchInventoryReorderAlerts(report, addNotification, { forceNotifyAll: options?.forceNotify });
+    } else if (options?.forceNotify) {
+      addNotification(
+        'success',
+        'Stock Levels Optimal',
+        `All formulations in ${currentTenant ? currentTenant.name : 'all branches'} are well above the threshold of ${report.thresholdUsed} units.`
+      );
+    }
+    return report;
+  }, [inventory, currentTenant, suppliers, addNotification]);
+
+  // Evaluate inventory reorder thresholds whenever inventory changes
+  useEffect(() => {
+    if (inventory.length > 0) {
+      const report = evaluateInventoryReorderThresholds(inventory, currentTenant, suppliers);
+      setReorderReport(report);
+
+      // On non-initial updates, check for alertable low stock items
+      if (!isInitialLoadRef.current && report.recommendations.length > 0) {
+        dispatchInventoryReorderAlerts(report, addNotification);
+      }
+      isInitialLoadRef.current = false;
+    }
+  }, [inventory, currentTenant, suppliers, addNotification]);
+
+  // Create Purchase Order directly from low-stock recommendations
+  const createReorderPurchaseOrder = useCallback(async (
+    customRecs?: ReorderItemRecommendation[]
+  ): Promise<PurchaseOrder | null> => {
+    if (!currentUser) {
+      addNotification('error', 'Authentication Required', 'Please sign in to create purchase orders.');
+      return null;
+    }
+
+    const itemsToOrder = customRecs || reorderReport?.recommendations;
+    if (!itemsToOrder || itemsToOrder.length === 0) {
+      addNotification('info', 'No Reorders Needed', 'No items are currently below the reorder threshold.');
+      return null;
+    }
+
+    const targetTenantId = currentTenant?.id || tenants[0]?.id || 'tenant-1';
+    const draftPayload = buildPurchaseOrderFromReorder(itemsToOrder, targetTenantId, undefined, suppliers);
+
+    try {
+      const createdPo = await api.createPurchaseOrder(draftPayload);
+      addNotification(
+        'success',
+        'Reorder Purchase Order Drafted',
+        `PO ${createdPo.orderNumber} successfully issued for ${createdPo.items.length} low-stock formulations (${createdPo.supplierName}).`
+      );
+      await refreshData();
+      return createdPo;
+    } catch (err: any) {
+      addNotification('error', 'Reorder PO Failed', err.message || 'Could not generate purchase order.');
+      return null;
+    }
+  }, [currentUser, currentTenant, tenants, suppliers, reorderReport, addNotification, refreshData]);
 
   // POS Cart Methods
   const addToCart = (item: InventoryItem, specificBatch?: InventoryBatch, qty: number = 1) => {
@@ -489,6 +572,11 @@ export const PharmacyProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         analytics,
         isLoading,
         refreshData,
+        reorderReport,
+        isReorderAlertOpen,
+        setIsReorderAlertOpen,
+        checkReorderStatus,
+        createReorderPurchaseOrder,
         cart,
         selectedCustomer,
         setSelectedCustomer,

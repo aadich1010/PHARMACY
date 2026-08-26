@@ -4,6 +4,8 @@ import {
   Search, 
   Filter, 
   AlertTriangle, 
+  AlertCircle,
+  CheckCircle2,
   Calendar, 
   Package, 
   Layers, 
@@ -44,13 +46,18 @@ export const InventoryManager: React.FC = () => {
     refreshData, 
     addNotification, 
     openAiModalWithTab, 
-    addToCart 
+    addToCart,
+    reorderReport,
+    setIsReorderAlertOpen,
+    checkReorderStatus,
+    createReorderPurchaseOrder
   } = usePharmacy();
 
   const [search, setSearch] = useState('');
   const [selectedCategory, setSelectedCategory] = useState<string>('All');
   const [filterType, setFilterType] = useState<'all' | 'low-stock' | 'expiring-soon' | 'rx-only'>('all');
   const [expandedMedicineId, setExpandedMedicineId] = useState<string | null>(null);
+  const [isAuditingReorders, setIsAuditingReorders] = useState(false);
 
   // Modals
   const [isAddMedModalOpen, setIsAddMedModalOpen] = useState(false);
@@ -202,6 +209,23 @@ export const InventoryManager: React.FC = () => {
         </div>
 
         <div className="flex items-center gap-2.5 flex-wrap">
+          {/* Live Reorder Threshold Audit */}
+          <button
+            id="btn-run-threshold-audit"
+            onClick={() => {
+              setIsAuditingReorders(true);
+              setTimeout(() => {
+                checkReorderStatus({ forceNotify: true });
+                setIsAuditingReorders(false);
+              }, 400);
+            }}
+            disabled={isAuditingReorders}
+            className="flex items-center gap-1.5 px-4 py-2.5 rounded-2xl bg-amber-500/10 hover:bg-amber-500/20 text-amber-900 border border-amber-500/30 font-bold text-xs shadow-xs transition-all cursor-pointer disabled:opacity-50"
+          >
+            <AlertTriangle className={`w-4 h-4 text-amber-600 ${isAuditingReorders ? 'animate-bounce' : ''}`} />
+            <span>{isAuditingReorders ? 'Auditing...' : 'Check Thresholds'}</span>
+          </button>
+
           {/* AI Reorder Assistant */}
           <button
             id="btn-ai-forecast-reorder"
@@ -223,6 +247,56 @@ export const InventoryManager: React.FC = () => {
           </button>
         </div>
       </div>
+
+      {/* Interactive Inventory Reorder Alert Banner */}
+      {reorderReport && reorderReport.lowStockCount > 0 && (
+        <div 
+          id="inventory-reorder-alert-banner"
+          className="bg-gradient-to-r from-amber-500/15 via-orange-500/10 to-rose-500/10 border border-amber-300/80 rounded-3xl p-4 sm:p-5 backdrop-blur-xl shadow-lg shadow-amber-500/5 flex flex-col md:flex-row items-start md:items-center justify-between gap-4 animate-in fade-in slide-in-from-top-2 duration-200"
+        >
+          <div className="flex items-start gap-3.5">
+            <div className="w-10 h-10 rounded-2xl bg-amber-500/20 text-amber-700 flex items-center justify-center shrink-0 border border-amber-500/30">
+              <AlertTriangle className="w-5 h-5" />
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <span className="font-bold text-slate-900 text-sm">
+                  {reorderReport.lowStockCount} Medicines Below Reorder Threshold ({reorderReport.thresholdUsed} units)
+                </span>
+                {reorderReport.outOfStockCount > 0 && (
+                  <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-rose-600 text-white">
+                    {reorderReport.outOfStockCount} Out of Stock
+                  </span>
+                )}
+              </div>
+              <p className="text-xs text-slate-600 mt-0.5">
+                {reorderReport.tenantName}: Estimated replenishment cost is{' '}
+                <strong className="text-amber-900 font-bold">
+                  {reorderReport.currency} {reorderReport.totalEstimatedReorderCost.toLocaleString()}
+                </strong>
+                . Action required to avoid stockouts.
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2 w-full md:w-auto">
+            <button
+              id="btn-banner-view-reorders"
+              onClick={() => setIsReorderAlertOpen(true)}
+              className="flex-1 md:flex-none px-4 py-2 rounded-xl bg-amber-600 hover:bg-amber-500 text-white font-bold text-xs shadow-md shadow-amber-600/20 transition-all cursor-pointer"
+            >
+              Open Reorder Center
+            </button>
+            <button
+              id="btn-banner-filter-low"
+              onClick={() => setFilterType('low-stock')}
+              className="flex-1 md:flex-none px-3.5 py-2 rounded-xl border border-amber-300 bg-white/80 hover:bg-white text-amber-900 font-semibold text-xs transition-colors cursor-pointer"
+            >
+              Filter in Table
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Filter Bar */}
       <div className="bg-white/50 backdrop-blur-xl p-5 rounded-3xl border border-white/60 shadow-xl shadow-blue-500/5 space-y-3.5">
@@ -377,15 +451,41 @@ export const InventoryManager: React.FC = () => {
 
                         {/* Batch count & toggle */}
                         <td className="px-5 py-4">
-                          <button
-                            id={`btn-expand-batches-${item.id}`}
-                            onClick={() => setExpandedMedicineId(isExpanded ? null : item.id)}
-                            className="flex items-center gap-1 text-slate-700 font-bold hover:text-cyan-700 cursor-pointer"
-                          >
-                            <Layers className="w-3.5 h-3.5 text-cyan-600" />
-                            <span>{activeBatchesCount} Batch{activeBatchesCount === 1 ? '' : 'es'}</span>
-                            {isExpanded ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
-                          </button>
+                          {(() => {
+                            const threshold = currentTenant?.lowStockDefaultThreshold || 20;
+                            const depletedCount = availableBatches.filter((b) => b.stockQuantity === 0).length;
+                            const lowCount = availableBatches.filter((b) => b.stockQuantity > 0 && b.stockQuantity <= threshold).length;
+
+                            return (
+                              <div className="space-y-1">
+                                <button
+                                  id={`btn-expand-batches-${item.id}`}
+                                  onClick={() => setExpandedMedicineId(isExpanded ? null : item.id)}
+                                  className="flex items-center gap-1.5 text-slate-700 font-bold hover:text-cyan-700 cursor-pointer"
+                                >
+                                  <Layers className="w-3.5 h-3.5 text-cyan-600" />
+                                  <span>{activeBatchesCount} Batch{activeBatchesCount === 1 ? '' : 'es'}</span>
+                                  {isExpanded ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+                                </button>
+
+                                {/* Batch stock warning indicators in main row */}
+                                <div className="flex flex-col gap-0.5">
+                                  {depletedCount > 0 && (
+                                    <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-rose-500/15 text-rose-800 border border-rose-300/80 text-[10px] font-bold w-fit">
+                                      <AlertCircle className="w-2.5 h-2.5 text-rose-600" />
+                                      {depletedCount} depleted batch{depletedCount > 1 ? 'es' : ''}
+                                    </span>
+                                  )}
+                                  {lowCount > 0 && (
+                                    <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-amber-500/15 text-amber-900 border border-amber-300/80 text-[10px] font-bold w-fit">
+                                      <AlertTriangle className="w-2.5 h-2.5 text-amber-600" />
+                                      {lowCount} low stock batch{lowCount > 1 ? 'es' : ''}
+                                    </span>
+                                  )}
+                                </div>
+                              </div>
+                            );
+                          })()}
                         </td>
 
                         {/* Total Stock */}
@@ -460,89 +560,205 @@ export const InventoryManager: React.FC = () => {
                       {isExpanded && (
                         <tr className="bg-white/30 backdrop-blur-md border-y border-white/60">
                           <td colSpan={7} className="px-6 py-5">
-                            <div className="space-y-3.5">
-                              <div className="flex items-center justify-between">
-                                <h4 className="font-bold text-xs text-cyan-950 flex items-center gap-1.5">
-                                  <Layers className="w-4 h-4 text-cyan-700" />
-                                  <span>Active Batches for {item.brandName} ({currentTenant ? currentTenant.name : 'All Branches'})</span>
-                                </h4>
-                                <button
-                                  id={`btn-add-batch-drawer-${item.id}`}
-                                  onClick={() => {
-                                    setSelectedMedForBatch(item);
-                                    setIsAddBatchModalOpen(true);
-                                  }}
-                                  className="text-xs text-cyan-800 hover:text-cyan-900 font-bold cursor-pointer underline"
-                                >
-                                  + Add New Batch
-                                </button>
+                            <div className="space-y-4">
+                              {/* Header with summary stats */}
+                              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-200/60 pb-3">
+                                <div>
+                                  <h4 className="font-bold text-xs text-cyan-950 flex items-center gap-1.5">
+                                    <Layers className="w-4 h-4 text-cyan-700" />
+                                    <span>Individual Batches for {item.brandName}</span>
+                                    <span className="text-[10px] text-slate-500 font-normal">
+                                      ({currentTenant ? currentTenant.name : 'All Branches'})
+                                    </span>
+                                  </h4>
+                                  <div className="flex items-center gap-2 mt-1 flex-wrap">
+                                    <span className="text-[10px] px-2 py-0.5 rounded-full bg-slate-100 text-slate-700 font-semibold border border-slate-200">
+                                      Total: {availableBatches.length} Batches
+                                    </span>
+                                    {availableBatches.filter(b => b.stockQuantity === 0).length > 0 && (
+                                      <span className="text-[10px] px-2 py-0.5 rounded-full bg-rose-500/15 text-rose-800 font-bold border border-rose-300 flex items-center gap-1">
+                                        <AlertCircle className="w-2.5 h-2.5 text-rose-600" />
+                                        {availableBatches.filter(b => b.stockQuantity === 0).length} Depleted
+                                      </span>
+                                    )}
+                                    {availableBatches.filter(b => b.stockQuantity > 0 && b.stockQuantity <= (currentTenant?.lowStockDefaultThreshold || 20)).length > 0 && (
+                                      <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-900 font-bold border border-amber-300 flex items-center gap-1">
+                                        <AlertTriangle className="w-2.5 h-2.5 text-amber-600" />
+                                        {availableBatches.filter(b => b.stockQuantity > 0 && b.stockQuantity <= (currentTenant?.lowStockDefaultThreshold || 20)).length} Low Stock
+                                      </span>
+                                    )}
+                                  </div>
+                                </div>
+
+                                <div className="flex items-center gap-2">
+                                  <button
+                                    id={`btn-add-batch-drawer-${item.id}`}
+                                    onClick={() => {
+                                      setSelectedMedForBatch(item);
+                                      setIsAddBatchModalOpen(true);
+                                    }}
+                                    className="px-3 py-1.5 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-bold shadow-xs transition-colors cursor-pointer flex items-center gap-1"
+                                  >
+                                    <Plus className="w-3.5 h-3.5" />
+                                    <span>Add New Batch</span>
+                                  </button>
+                                </div>
                               </div>
 
                               {availableBatches.length === 0 ? (
-                                <div className="p-4 bg-white/60 rounded-2xl border border-white/70 text-center text-slate-400 text-xs">
-                                  No batches currently registered for this medicine in this branch.
+                                <div className="p-5 bg-white/60 rounded-2xl border border-white/70 text-center text-slate-400 text-xs">
+                                  No active batches currently registered for this formulation.
                                 </div>
                               ) : (
                                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3.5">
                                   {availableBatches.map((batch) => {
                                     const isAdjusting = adjustingBatchId === batch.id;
+                                    const threshold = currentTenant?.lowStockDefaultThreshold || 20;
+                                    const isOutOfStock = batch.stockQuantity === 0;
+                                    const isCriticalLow = !isOutOfStock && batch.stockQuantity <= Math.max(5, Math.floor(threshold / 2));
+                                    const isLowStock = !isOutOfStock && !isCriticalLow && batch.stockQuantity <= threshold;
+                                    const isOptimal = batch.stockQuantity > threshold;
+
+                                    const initialQty = batch.initialQuantity || Math.max(batch.stockQuantity, 50);
+                                    const percent = isOutOfStock ? 0 : Math.min(100, Math.max(5, Math.round((batch.stockQuantity / initialQty) * 100)));
+
                                     return (
                                       <div
                                         key={batch.id}
-                                        className="bg-white/70 backdrop-blur-md p-4 rounded-2xl border border-white/70 shadow-lg shadow-cyan-950/5 relative space-y-2.5"
+                                        id={`batch-card-${batch.id}`}
+                                        className={`backdrop-blur-md p-4 rounded-2xl relative space-y-3 transition-all ${
+                                          isOutOfStock 
+                                            ? 'bg-rose-50/80 border-2 border-rose-400/90 shadow-md shadow-rose-500/10' 
+                                            : isCriticalLow
+                                            ? 'bg-amber-50/80 border-2 border-amber-400/90 shadow-md shadow-amber-500/10'
+                                            : isLowStock
+                                            ? 'bg-amber-50/40 border border-amber-300 shadow-sm shadow-amber-500/5'
+                                            : 'bg-white/80 border border-white/80 shadow-lg shadow-cyan-950/5'
+                                        }`}
                                       >
-                                        <div className="flex items-center justify-between">
-                                          <span className="font-bold text-xs text-cyan-950 bg-cyan-600/10 px-2.5 py-0.5 rounded-lg border border-cyan-500/20">
-                                            {batch.batchNumber}
-                                          </span>
-                                          <span className="text-[10px] text-slate-500 font-bold">
-                                            Rack: <strong className="text-slate-800">{batch.locationRack}</strong>
+                                        {/* Status Strip */}
+                                        {isOutOfStock ? (
+                                          <div className="flex items-center justify-between px-2.5 py-1 bg-rose-600 text-white rounded-lg text-[10px] font-bold tracking-wide">
+                                            <span className="flex items-center gap-1">
+                                              <AlertCircle className="w-3 h-3" />
+                                              OUT OF STOCK (0 UNITS)
+                                            </span>
+                                            <span>REORDER REQUIRED</span>
+                                          </div>
+                                        ) : isCriticalLow ? (
+                                          <div className="flex items-center justify-between px-2.5 py-1 bg-amber-500 text-slate-950 rounded-lg text-[10px] font-bold tracking-wide">
+                                            <span className="flex items-center gap-1">
+                                              <AlertTriangle className="w-3 h-3" />
+                                              CRITICALLY LOW STOCK
+                                            </span>
+                                            <span>{batch.stockQuantity} UNITS LEFT</span>
+                                          </div>
+                                        ) : isLowStock ? (
+                                          <div className="flex items-center justify-between px-2.5 py-0.5 bg-amber-100 text-amber-900 border border-amber-300 rounded-lg text-[10px] font-bold">
+                                            <span className="flex items-center gap-1">
+                                              <AlertTriangle className="w-2.5 h-2.5 text-amber-600" />
+                                              LOW STOCK BATCH
+                                            </span>
+                                            <span>≤ {threshold} threshold</span>
+                                          </div>
+                                        ) : (
+                                          <div className="flex items-center justify-between px-2.5 py-0.5 bg-emerald-50 text-emerald-800 border border-emerald-200/80 rounded-lg text-[10px] font-medium">
+                                            <span className="flex items-center gap-1">
+                                              <CheckCircle2 className="w-2.5 h-2.5 text-emerald-600" />
+                                              ADEQUATE INVENTORY
+                                            </span>
+                                            <span>Optimal Stock</span>
+                                          </div>
+                                        )}
+
+                                        {/* Batch Top Details */}
+                                        <div className="flex items-center justify-between pt-0.5">
+                                          <div className="flex items-center gap-1.5">
+                                            <span className="font-bold text-xs text-cyan-950 bg-cyan-600/10 px-2.5 py-0.5 rounded-lg border border-cyan-500/20">
+                                              {batch.batchNumber}
+                                            </span>
+                                          </div>
+                                          <span className="text-[10px] text-slate-600 font-bold">
+                                            Rack: <strong className="text-slate-900 bg-white/80 px-1.5 py-0.5 rounded border border-slate-200">{batch.locationRack}</strong>
                                           </span>
                                         </div>
 
-                                        <div className="grid grid-cols-2 gap-2 pt-2 border-t border-slate-200/50 text-[11px]">
-                                          <div>
-                                            <span className="text-slate-400 block text-[10px]">Expiry</span>
-                                            <span className="font-bold text-slate-700">{batch.expiryDate}</span>
-                                          </div>
-                                          <div>
-                                            <span className="text-slate-400 block text-[10px]">Stock</span>
-                                            <span className="font-bold text-cyan-700 text-xs">
-                                              {batch.stockQuantity} units
+                                        {/* Stock Level Display & Visual Progress Meter */}
+                                        <div className="p-2.5 rounded-xl bg-white/70 border border-white/80 space-y-1.5">
+                                          <div className="flex items-center justify-between">
+                                            <span className="text-[10px] text-slate-500 font-medium">Available Quantity:</span>
+                                            <span className={`font-extrabold text-xs ${
+                                              isOutOfStock ? 'text-rose-600 font-black' :
+                                              isCriticalLow ? 'text-amber-800 font-black' :
+                                              isLowStock ? 'text-amber-700' : 'text-cyan-800'
+                                            }`}>
+                                              {batch.stockQuantity} units {isOutOfStock ? '(Depleted)' : ''}
                                             </span>
+                                          </div>
+                                          {/* Mini Stock Fill Bar */}
+                                          <div className="w-full bg-slate-200/80 rounded-full h-2 overflow-hidden">
+                                            <div 
+                                              className={`h-full rounded-full transition-all duration-300 ${
+                                                isOutOfStock ? 'bg-rose-500 w-0' :
+                                                isCriticalLow ? 'bg-rose-500' :
+                                                isLowStock ? 'bg-amber-500' : 'bg-emerald-500'
+                                              }`}
+                                              style={{ width: `${percent}%` }}
+                                            />
+                                          </div>
+                                          <div className="flex justify-between text-[9px] text-slate-400">
+                                            <span>0</span>
+                                            <span>Threshold: {threshold}</span>
+                                            <span>Cap: {initialQty}</span>
+                                          </div>
+                                        </div>
+
+                                        {/* Grid Details */}
+                                        <div className="grid grid-cols-2 gap-2 text-[11px] pt-1">
+                                          <div>
+                                            <span className="text-slate-400 block text-[10px]">Expiry Date</span>
+                                            <span className="font-bold text-slate-800">{batch.expiryDate}</span>
                                           </div>
                                           <div>
                                             <span className="text-slate-400 block text-[10px]">Purchase Cost</span>
-                                            <span className="text-slate-600 font-medium">{currentTenant?.currency || 'PKR'} {batch.purchasePrice}</span>
+                                            <span className="text-slate-700 font-semibold">{currentTenant?.currency || 'PKR'} {batch.purchasePrice}</span>
                                           </div>
                                           <div>
-                                            <span className="text-slate-400 block text-[10px]">Selling MRP</span>
+                                            <span className="text-slate-400 block text-[10px]">Retail MRP</span>
                                             <span className="font-bold text-slate-900">{currentTenant?.currency || 'PKR'} {batch.sellingPrice}</span>
+                                          </div>
+                                          <div>
+                                            <span className="text-slate-400 block text-[10px]">Margin</span>
+                                            <span className="font-bold text-emerald-700">
+                                              {batch.sellingPrice > batch.purchasePrice 
+                                                ? `+${Math.round(((batch.sellingPrice - batch.purchasePrice) / batch.purchasePrice) * 100)}%` 
+                                                : '0%'}
+                                            </span>
                                           </div>
                                         </div>
 
-                                        {/* Stock Adjuster */}
-                                        <div className="pt-2 border-t border-slate-200/50 flex items-center justify-between">
+                                        {/* Stock Adjuster / Action Bar */}
+                                        <div className="pt-2 border-t border-slate-200/60 flex items-center justify-between gap-2">
                                           {isAdjusting ? (
                                             <div className="flex items-center gap-1.5 w-full">
                                               <input
                                                 id={`input-adjust-${batch.id}`}
                                                 type="number"
-                                                className="w-16 px-2 py-1 text-xs border border-white/80 rounded-xl bg-white focus:outline-none focus:ring-1 focus:ring-cyan-500 shadow-xs"
+                                                className="w-16 px-2 py-1 text-xs border border-cyan-300 rounded-xl bg-white focus:outline-none focus:ring-1 focus:ring-cyan-500 shadow-xs"
                                                 value={adjustQuantity}
                                                 onChange={(e) => setAdjustQuantity(Number(e.target.value))}
                                               />
                                               <button
                                                 id={`btn-save-adjust-${batch.id}`}
                                                 onClick={() => handleSaveStockAdjustment(batch.id)}
-                                                className="px-2.5 py-1 bg-cyan-600 text-white rounded-xl text-[10px] font-bold cursor-pointer shadow-xs"
+                                                className="px-2.5 py-1 bg-cyan-600 hover:bg-cyan-500 text-white rounded-xl text-[10px] font-bold cursor-pointer shadow-xs"
                                               >
                                                 Save
                                               </button>
                                               <button
                                                 id={`btn-cancel-adjust-${batch.id}`}
                                                 onClick={() => setAdjustingBatchId(null)}
-                                                className="px-2 py-1 bg-white/80 text-slate-700 rounded-xl text-[10px] border border-white/80 cursor-pointer shadow-xs"
+                                                className="px-2 py-1 bg-white text-slate-700 rounded-xl text-[10px] border border-slate-200 cursor-pointer shadow-xs"
                                               >
                                                 Cancel
                                               </button>
@@ -555,18 +771,25 @@ export const InventoryManager: React.FC = () => {
                                                   setAdjustingBatchId(batch.id);
                                                   setAdjustQuantity(batch.stockQuantity);
                                                 }}
-                                                className="text-[10px] text-slate-500 hover:text-slate-800 flex items-center gap-1 font-bold cursor-pointer"
+                                                className="text-[10px] text-slate-600 hover:text-slate-900 flex items-center gap-1 font-bold cursor-pointer transition-colors"
                                               >
                                                 <Edit3 className="w-3 h-3" /> Adjust Stock
                                               </button>
-                                              <button
-                                                id={`btn-dispense-batch-${batch.id}`}
-                                                onClick={() => addToCart(item, batch, 1)}
-                                                disabled={batch.stockQuantity === 0}
-                                                className="px-2.5 py-1 rounded-xl bg-cyan-600/10 hover:bg-cyan-600/20 text-cyan-900 text-[10px] font-bold border border-cyan-500/20 cursor-pointer shadow-xs"
-                                              >
-                                                Dispense Batch
-                                              </button>
+                                              
+                                              <div className="flex items-center gap-1.5">
+                                                <button
+                                                  id={`btn-dispense-batch-${batch.id}`}
+                                                  onClick={() => addToCart(item, batch, 1)}
+                                                  disabled={batch.stockQuantity === 0}
+                                                  className={`px-2.5 py-1 rounded-xl text-[10px] font-bold transition-all cursor-pointer shadow-xs ${
+                                                    batch.stockQuantity === 0
+                                                      ? 'bg-slate-100 text-slate-400 cursor-not-allowed border border-slate-200'
+                                                      : 'bg-cyan-600/10 hover:bg-cyan-600/20 text-cyan-900 border border-cyan-500/20'
+                                                  }`}
+                                                >
+                                                  Dispense Batch
+                                                </button>
+                                              </div>
                                             </>
                                           )}
                                         </div>

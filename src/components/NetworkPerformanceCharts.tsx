@@ -14,7 +14,10 @@ import {
   ArrowUpRight,
   Filter,
   DollarSign,
-  Boxes
+  Boxes,
+  Package,
+  Percent,
+  Coins
 } from 'lucide-react';
 import { 
   ResponsiveContainer, 
@@ -57,8 +60,9 @@ export const NetworkPerformanceCharts: React.FC<NetworkPerformanceChartsProps> =
   tenants, 
   onNavigateBranch 
 }) => {
-  const [activeTab, setActiveTab] = useState<'revenue' | 'turnover' | 'category'>('revenue');
+  const [activeTab, setActiveTab] = useState<'revenue' | 'inventory_value' | 'turnover' | 'category'>('revenue');
   const [revenueChartType, setRevenueChartType] = useState<'stacked' | 'grouped' | 'area'>('stacked');
+  const [inventoryMetric, setInventoryMetric] = useState<'valuation' | 'units' | 'efficiency'>('valuation');
   const [timeRange, setTimeRange] = useState<'6m' | '3m'>('6m');
   const [selectedBranches, setSelectedBranches] = useState<string[]>(() => 
     tenants.map(t => t.branchCode)
@@ -111,6 +115,46 @@ export const NetworkPerformanceCharts: React.FC<NetworkPerformanceChartsProps> =
     return [...analytics.tenantComparisons].sort((a, b) => b.revenue - a.revenue)[0];
   }, [analytics.tenantComparisons]);
 
+  // Branch inventory value and asset comparison data
+  const inventoryValueData = useMemo(() => {
+    const comparisons = analytics.tenantComparisons || [];
+    const totalGroupVal = comparisons.reduce((sum, c) => sum + c.inventoryValue, 0);
+
+    return comparisons.map((c) => {
+      const sharePercent = totalGroupVal > 0 ? Number(((c.inventoryValue / totalGroupVal) * 100).toFixed(1)) : 0;
+      const capitalEfficiency = c.inventoryValue > 0 ? Number(((c.revenue / c.inventoryValue) * 100).toFixed(1)) : 0;
+      const avgUnitCost = c.stockItemsCount > 0 ? Math.round(c.inventoryValue / c.stockItemsCount) : 0;
+
+      return {
+        tenantId: c.tenantId,
+        branchCode: c.branchCode,
+        tenantName: c.tenantName,
+        city: c.city,
+        inventoryValue: c.inventoryValue,
+        stockItemsCount: c.stockItemsCount,
+        revenue: c.revenue,
+        lowStockCount: c.lowStockCount,
+        sharePercent,
+        capitalEfficiency,
+        avgUnitCost,
+      };
+    });
+  }, [analytics.tenantComparisons]);
+
+  const totalNetworkInventory = useMemo(() => {
+    return (analytics.tenantComparisons || []).reduce((sum, c) => sum + c.inventoryValue, 0);
+  }, [analytics.tenantComparisons]);
+
+  const avgBranchInventory = useMemo(() => {
+    if (!analytics.tenantComparisons?.length) return 0;
+    return Math.round(totalNetworkInventory / analytics.tenantComparisons.length);
+  }, [totalNetworkInventory, analytics.tenantComparisons]);
+
+  const highestInventoryBranch = useMemo(() => {
+    if (!inventoryValueData.length) return null;
+    return [...inventoryValueData].sort((a, b) => b.inventoryValue - a.inventoryValue)[0];
+  }, [inventoryValueData]);
+
   // Custom Glassmorphic Tooltip for Revenue Chart
   const CustomRevenueTooltip = ({ active, payload, label }: any) => {
     if (active && payload && payload.length) {
@@ -152,6 +196,52 @@ export const NetworkPerformanceCharts: React.FC<NetworkPerformanceChartsProps> =
           <div className="pt-2 mt-1 border-t border-white/15 flex justify-between font-bold text-cyan-300">
             <span>Total Network Revenue:</span>
             <span>PKR {total.toLocaleString()}</span>
+          </div>
+        </div>
+      );
+    }
+    return null;
+  };
+
+  // Custom Glassmorphic Tooltip for Inventory Valuation Chart
+  const CustomInventoryTooltip = ({ active, payload }: any) => {
+    if (active && payload && payload.length) {
+      const data = payload[0].payload;
+      return (
+        <div className="bg-slate-950/90 backdrop-blur-xl p-4 rounded-2xl border border-white/20 shadow-2xl text-white text-xs space-y-2.5 min-w-[250px]">
+          <div className="border-b border-white/15 pb-2 flex items-center justify-between">
+            <div>
+              <span className="font-bold text-sm text-cyan-300">{data.branchCode}</span>
+              <span className="text-[11px] text-slate-300 ml-1.5 font-medium truncate max-w-[130px] inline-block align-bottom">{data.tenantName}</span>
+            </div>
+            <span className="text-[10px] px-2 py-0.5 rounded-full bg-teal-500/20 text-teal-300 border border-teal-500/30 font-bold">
+              {data.sharePercent}% Group Share
+            </span>
+          </div>
+
+          <div className="space-y-1.5 text-[11px]">
+            <div className="flex justify-between">
+              <span className="text-slate-400">Inventory Valuation:</span>
+              <span className="font-extrabold text-cyan-300 text-sm">PKR {Number(data.inventoryValue).toLocaleString()}</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-slate-400">Physical Stock Count:</span>
+              <span className="font-semibold text-slate-200">{Number(data.stockItemsCount).toLocaleString()} units</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-slate-400">Average Unit Cost:</span>
+              <span className="font-medium text-slate-300">PKR {data.avgUnitCost}</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-slate-400">Low Stock Formulations:</span>
+              <span className={`font-bold ${data.lowStockCount > 0 ? 'text-amber-300' : 'text-emerald-300'}`}>
+                {data.lowStockCount > 0 ? `${data.lowStockCount} Items Below Threshold` : 'Optimal'}
+              </span>
+            </div>
+            <div className="flex justify-between pt-1 border-t border-white/15">
+              <span className="text-slate-400">Revenue-to-Asset Efficiency:</span>
+              <span className="font-bold text-emerald-300">{data.capitalEfficiency}%</span>
+            </div>
           </div>
         </div>
       );
@@ -229,11 +319,11 @@ export const NetworkPerformanceCharts: React.FC<NetworkPerformanceChartsProps> =
         </div>
 
         {/* View Switcher Tabs */}
-        <div className="flex items-center p-1 bg-white/70 backdrop-blur-md rounded-2xl border border-white/80 shadow-xs self-start lg:self-auto">
+        <div className="flex items-center p-1 bg-white/70 backdrop-blur-md rounded-2xl border border-white/80 shadow-xs self-start lg:self-auto overflow-x-auto max-w-full">
           <button
             id="tab-chart-revenue"
             onClick={() => setActiveTab('revenue')}
-            className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl font-bold text-xs transition-all cursor-pointer ${
+            className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl font-bold text-xs transition-all cursor-pointer whitespace-nowrap ${
               activeTab === 'revenue'
                 ? 'bg-gradient-to-r from-cyan-600 to-teal-600 text-white shadow-md shadow-cyan-600/20'
                 : 'text-slate-600 hover:text-cyan-950 hover:bg-white/50'
@@ -244,9 +334,22 @@ export const NetworkPerformanceCharts: React.FC<NetworkPerformanceChartsProps> =
           </button>
 
           <button
+            id="tab-chart-inventory-val"
+            onClick={() => setActiveTab('inventory_value')}
+            className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl font-bold text-xs transition-all cursor-pointer whitespace-nowrap ${
+              activeTab === 'inventory_value'
+                ? 'bg-gradient-to-r from-cyan-600 to-teal-600 text-white shadow-md shadow-cyan-600/20'
+                : 'text-slate-600 hover:text-cyan-950 hover:bg-white/50'
+            }`}
+          >
+            <Package className="w-3.5 h-3.5" />
+            <span>Inventory Value by Branch</span>
+          </button>
+
+          <button
             id="tab-chart-turnover"
             onClick={() => setActiveTab('turnover')}
-            className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl font-bold text-xs transition-all cursor-pointer ${
+            className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl font-bold text-xs transition-all cursor-pointer whitespace-nowrap ${
               activeTab === 'turnover'
                 ? 'bg-gradient-to-r from-cyan-600 to-teal-600 text-white shadow-md shadow-cyan-600/20'
                 : 'text-slate-600 hover:text-cyan-950 hover:bg-white/50'
@@ -259,7 +362,7 @@ export const NetworkPerformanceCharts: React.FC<NetworkPerformanceChartsProps> =
           <button
             id="tab-chart-category"
             onClick={() => setActiveTab('category')}
-            className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl font-bold text-xs transition-all cursor-pointer ${
+            className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl font-bold text-xs transition-all cursor-pointer whitespace-nowrap ${
               activeTab === 'category'
                 ? 'bg-gradient-to-r from-cyan-600 to-teal-600 text-white shadow-md shadow-cyan-600/20'
                 : 'text-slate-600 hover:text-cyan-950 hover:bg-white/50'
@@ -274,39 +377,39 @@ export const NetworkPerformanceCharts: React.FC<NetworkPerformanceChartsProps> =
       {/* 4 Summary Highlight Chips */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5">
         <div className="bg-white/70 backdrop-blur-md rounded-2xl p-3.5 border border-white/80 shadow-xs">
-          <span className="text-[11px] font-semibold text-slate-500 block">Avg Network Turnover Rate</span>
+          <span className="text-[11px] font-semibold text-slate-500 block">Total Group Inventory Value</span>
           <div className="flex items-baseline gap-2 mt-1">
-            <span className="text-xl font-extrabold text-cyan-950">{analytics.averageNetworkTurnoverRate || 5.4}x</span>
-            <span className="text-[11px] font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-md border border-emerald-200">
-              Above 5.0x Target
+            <span className="text-xl font-extrabold text-cyan-950">PKR {totalNetworkInventory.toLocaleString()}</span>
+            <span className="text-[11px] font-bold text-teal-800 bg-teal-50 px-2 py-0.5 rounded-md border border-teal-200">
+              {tenants.length} Branches
             </span>
           </div>
-          <span className="text-[10px] text-slate-400 mt-1 block">Full network inventory replacement cycles/yr</span>
+          <span className="text-[10px] text-slate-400 mt-1 block">Live aggregated stock valuation across network</span>
         </div>
 
         <div className="bg-white/70 backdrop-blur-md rounded-2xl p-3.5 border border-white/80 shadow-xs">
-          <span className="text-[11px] font-semibold text-slate-500 block">Avg Days Sales in Stock (DSI)</span>
+          <span className="text-[11px] font-semibold text-slate-500 block">Avg Branch Stock Valuation</span>
           <div className="flex items-baseline gap-2 mt-1">
-            <span className="text-xl font-extrabold text-cyan-950">{analytics.averageDaysSalesInventory || 67} Days</span>
+            <span className="text-xl font-extrabold text-cyan-950">PKR {avgBranchInventory.toLocaleString()}</span>
             <span className="text-[11px] font-bold text-cyan-800 bg-cyan-50 px-2 py-0.5 rounded-md border border-cyan-200">
-              Lean Safety Stock
+              Balanced
             </span>
           </div>
-          <span className="text-[10px] text-slate-400 mt-1 block">Time required to liquidate inventory</span>
+          <span className="text-[10px] text-slate-400 mt-1 block">Mean working capital per retail branch</span>
         </div>
 
         <div className="bg-white/70 backdrop-blur-md rounded-2xl p-3.5 border border-white/80 shadow-xs">
-          <span className="text-[11px] font-semibold text-slate-500 block">Highest Velocity Branch</span>
+          <span className="text-[11px] font-semibold text-slate-500 block">Highest Asset Branch</span>
           <div className="flex items-baseline gap-2 mt-1">
             <span className="text-base font-extrabold text-cyan-950 truncate max-w-[150px]">
-              {fastestBranch ? fastestBranch.branchCode : 'ASW-03'}
+              {highestInventoryBranch ? highestInventoryBranch.branchCode : 'APX-01'}
             </span>
-            <span className="text-[11px] font-extrabold text-emerald-700">
-              {fastestBranch ? `${fastestBranch.turnoverRate}x` : '6.8x'}
+            <span className="text-[11px] font-extrabold text-teal-700">
+              PKR {highestInventoryBranch ? (highestInventoryBranch.inventoryValue / 1000).toFixed(0) + 'k' : '0k'}
             </span>
           </div>
           <span className="text-[10px] text-slate-500 mt-1 block truncate">
-            {fastestBranch ? fastestBranch.tenantName : 'Medical City Campus'}
+            {highestInventoryBranch ? highestInventoryBranch.tenantName : 'Central Pharmacy'}
           </span>
         </div>
 
@@ -522,6 +625,226 @@ export const NetworkPerformanceCharts: React.FC<NetworkPerformanceChartsProps> =
                 </BarChart>
               )}
             </ResponsiveContainer>
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================================= */}
+      {/* TAB 2: INVENTORY VALUE ACROSS BRANCHES */}
+      {/* ========================================================================= */}
+      {activeTab === 'inventory_value' && (
+        <div className="space-y-6 animate-in fade-in">
+          {/* Sub-controls: Inventory Metric View */}
+          <div className="flex flex-wrap items-center justify-between gap-3 bg-white/60 p-3 rounded-2xl border border-white/70">
+            <div className="flex items-center gap-1">
+              <span className="text-xs font-bold text-slate-500 mr-2 flex items-center gap-1">
+                <BarChart3 className="w-3.5 h-3.5 text-cyan-700" /> Visualization Metric:
+              </span>
+              <button
+                id="btn-inv-metric-val"
+                onClick={() => setInventoryMetric('valuation')}
+                className={`px-3 py-1 rounded-xl text-xs font-bold transition-all cursor-pointer ${
+                  inventoryMetric === 'valuation'
+                    ? 'bg-cyan-900 text-white shadow-xs'
+                    : 'bg-white/80 text-slate-700 hover:bg-white'
+                }`}
+              >
+                Stock Valuation (PKR)
+              </button>
+              <button
+                id="btn-inv-metric-units"
+                onClick={() => setInventoryMetric('units')}
+                className={`px-3 py-1 rounded-xl text-xs font-bold transition-all cursor-pointer ${
+                  inventoryMetric === 'units'
+                    ? 'bg-cyan-900 text-white shadow-xs'
+                    : 'bg-white/80 text-slate-700 hover:bg-white'
+                }`}
+              >
+                Physical Stock Units
+              </button>
+              <button
+                id="btn-inv-metric-eff"
+                onClick={() => setInventoryMetric('efficiency')}
+                className={`px-3 py-1 rounded-xl text-xs font-bold transition-all cursor-pointer ${
+                  inventoryMetric === 'efficiency'
+                    ? 'bg-cyan-900 text-white shadow-xs'
+                    : 'bg-white/80 text-slate-700 hover:bg-white'
+                }`}
+              >
+                Revenue-to-Asset Efficiency
+              </button>
+            </div>
+
+            <div className="flex items-center gap-2 text-xs font-bold text-cyan-950">
+              <span className="px-2.5 py-1 rounded-xl bg-teal-500/10 text-teal-800 border border-teal-500/20">
+                Network Total: PKR {totalNetworkInventory.toLocaleString()}
+              </span>
+            </div>
+          </div>
+
+          {/* Recharts Canvas for Inventory Value */}
+          <div className="h-80 w-full pt-2">
+            <ResponsiveContainer width="100%" height="100%">
+              {inventoryMetric === 'efficiency' ? (
+                <ComposedChart data={inventoryValueData} margin={{ top: 15, right: 20, left: 10, bottom: 25 }}>
+                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="rgba(203, 213, 225, 0.4)" />
+                  <XAxis dataKey="branchCode" stroke="#64748b" fontSize={12} tickLine={false} />
+                  <YAxis 
+                    yAxisId="left"
+                    stroke="#0891b2" 
+                    fontSize={12} 
+                    tickLine={false} 
+                    axisLine={false}
+                    tickFormatter={(val) => `PKR ${(val / 1000).toFixed(0)}k`}
+                  />
+                  <YAxis 
+                    yAxisId="right"
+                    orientation="right"
+                    stroke="#10b981" 
+                    fontSize={12} 
+                    tickLine={false} 
+                    axisLine={false}
+                    tickFormatter={(val) => `${val}%`}
+                  />
+                  <Tooltip content={<CustomInventoryTooltip />} />
+                  <Legend 
+                    verticalAlign="top" 
+                    align="right"
+                    wrapperStyle={{ paddingBottom: '10px', fontSize: '11px', fontWeight: 600 }}
+                  />
+                  <Bar 
+                    yAxisId="left"
+                    dataKey="inventoryValue" 
+                    name="Inventory Valuation (PKR)" 
+                    radius={[8, 8, 0, 0]}
+                    barSize={40}
+                  >
+                    {inventoryValueData.map((entry, index) => (
+                      <Cell key={`cell-inv-${index}`} fill={branchColorMap[entry.branchCode] || BRANCH_COLORS[index % BRANCH_COLORS.length]} />
+                    ))}
+                  </Bar>
+                  <Line 
+                    yAxisId="right"
+                    type="monotone" 
+                    dataKey="capitalEfficiency" 
+                    name="Revenue / Stock Ratio (%)" 
+                    stroke="#10b981" 
+                    strokeWidth={3}
+                    dot={{ r: 5, fill: '#10b981', strokeWidth: 2, stroke: '#fff' }}
+                  />
+                </ComposedChart>
+              ) : (
+                <BarChart data={inventoryValueData} margin={{ top: 15, right: 20, left: 10, bottom: 25 }}>
+                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="rgba(203, 213, 225, 0.4)" />
+                  <XAxis dataKey="branchCode" stroke="#64748b" fontSize={12} tickLine={false} />
+                  <YAxis 
+                    stroke="#64748b" 
+                    fontSize={12} 
+                    tickLine={false} 
+                    axisLine={false}
+                    tickFormatter={(val) => inventoryMetric === 'valuation' ? `PKR ${(val / 1000).toFixed(0)}k` : `${val}u`}
+                  />
+                  <Tooltip content={<CustomInventoryTooltip />} />
+                  <Legend 
+                    verticalAlign="top" 
+                    align="right"
+                    wrapperStyle={{ paddingBottom: '10px', fontSize: '11px', fontWeight: 600 }}
+                  />
+                  {inventoryMetric === 'valuation' && (
+                    <ReferenceLine 
+                      y={avgBranchInventory} 
+                      stroke="#0d9488" 
+                      strokeDasharray="4 4" 
+                      strokeWidth={2}
+                      label={{ 
+                        value: `Avg Branch Asset (PKR ${(avgBranchInventory / 1000).toFixed(0)}k)`, 
+                        fill: '#0f766e', 
+                        fontSize: 11, 
+                        position: 'top',
+                        fontWeight: 700
+                      }} 
+                    />
+                  )}
+                  <Bar 
+                    dataKey={inventoryMetric === 'valuation' ? 'inventoryValue' : 'stockItemsCount'} 
+                    name={inventoryMetric === 'valuation' ? 'Inventory Valuation (PKR)' : 'Stocked Units Count'} 
+                    radius={[8, 8, 0, 0]}
+                    barSize={44}
+                  >
+                    {inventoryValueData.map((entry, index) => (
+                      <Cell key={`cell-bar-${index}`} fill={branchColorMap[entry.branchCode] || BRANCH_COLORS[index % BRANCH_COLORS.length]} />
+                    ))}
+                  </Bar>
+                </BarChart>
+              )}
+            </ResponsiveContainer>
+          </div>
+
+          {/* Branch Inventory Breakdown Matrix */}
+          <div className="bg-white/60 backdrop-blur-md rounded-2xl p-4 border border-white/70 overflow-x-auto">
+            <div className="flex items-center justify-between mb-3">
+              <h4 className="font-bold text-xs text-cyan-950">Branch Inventory Valuation & Capital Matrix</h4>
+              <span className="text-[11px] text-slate-500 font-medium">Consolidated Asset Audit</span>
+            </div>
+
+            <table className="w-full text-left text-xs border-collapse">
+              <thead>
+                <tr className="border-b border-slate-200/60 text-slate-500 font-semibold text-[11px]">
+                  <th className="pb-2 pl-2">Branch Code & Location</th>
+                  <th className="pb-2">Stock Valuation</th>
+                  <th className="pb-2">Group Share</th>
+                  <th className="pb-2">Physical Units</th>
+                  <th className="pb-2">Avg Unit Cost</th>
+                  <th className="pb-2">Stock Health</th>
+                  {onNavigateBranch && <th className="pb-2 text-right pr-2">Action</th>}
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {inventoryValueData.map((branch) => {
+                  return (
+                    <tr key={branch.tenantId} className="hover:bg-white/80 transition-colors">
+                      <td className="py-2.5 pl-2">
+                        <div className="font-bold text-slate-900">{branch.branchCode}</div>
+                        <div className="text-[11px] text-slate-500 truncate max-w-[180px]">{branch.tenantName} ({branch.city})</div>
+                      </td>
+                      <td className="py-2.5 font-bold text-cyan-950 text-sm">
+                        PKR {Number(branch.inventoryValue).toLocaleString()}
+                      </td>
+                      <td className="py-2.5 font-semibold text-teal-700">
+                        <span className="px-2 py-0.5 rounded-md bg-teal-50 border border-teal-200">
+                          {branch.sharePercent}%
+                        </span>
+                      </td>
+                      <td className="py-2.5 font-semibold text-slate-700">
+                        {Number(branch.stockItemsCount).toLocaleString()} units
+                      </td>
+                      <td className="py-2.5 font-medium text-slate-600">
+                        PKR {branch.avgUnitCost}
+                      </td>
+                      <td className="py-2.5">
+                        <span className={`px-2.5 py-0.5 rounded-full text-[10px] font-bold border ${
+                          branch.lowStockCount === 0
+                            ? 'bg-emerald-500/15 text-emerald-800 border-emerald-500/30'
+                            : 'bg-amber-500/15 text-amber-800 border-amber-500/30'
+                        }`}>
+                          {branch.lowStockCount === 0 ? 'Optimal' : `${branch.lowStockCount} Low Items`}
+                        </span>
+                      </td>
+                      {onNavigateBranch && (
+                        <td className="py-2.5 text-right pr-2">
+                          <button
+                            onClick={() => onNavigateBranch(branch.tenantId)}
+                            className="px-2.5 py-1 rounded-lg bg-cyan-600/10 hover:bg-cyan-600/20 text-cyan-800 font-bold text-[11px] border border-cyan-500/20 transition-all cursor-pointer"
+                          >
+                            Inspect Inventory →
+                          </button>
+                        </td>
+                      )}
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
           </div>
         </div>
       )}

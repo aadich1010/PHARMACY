@@ -243,4 +243,28 @@ export interface NetworkAnalytics {
     unitsSold: number;
     revenue: number;
   }[];
+  monthlyRevenueByTenant?: Array<{
+    month: string;
+    totalRevenue?: number;
+    [branchCode: string]: any;
+  }>;
+  tenantTurnoverMetrics?: Array<{
+    tenantId: string;
+    tenantName: string;
+    branchCode: string;
+    turnoverRate: number;
+    daysSalesInventory: number;
+    inventoryValuation: number;
+    targetBenchmark: number;
+    topFastMovingCategory: string;
+    efficiencyStatus: 'High Velocity' | 'Optimal' | 'Review Required';
+  }>;
+  averageNetworkTurnoverRate?: number;
+  averageDaysSalesInventory?: number;
+  categoryVelocityMetrics?: Array<{
+    category: string;
+    turnoverRate: number;
+    stockValue: number;
+    salesUnits: number;
+  }>;
 }

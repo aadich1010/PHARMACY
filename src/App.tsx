@@ -13,6 +13,7 @@ import { UsersManager } from './components/UsersManager';
 import { LoginScreen } from './components/LoginScreen';
 import { AiAssistantModal } from './components/AiAssistantModal';
 import { ReceiptModal } from './components/ReceiptModal';
+import { ReorderAlertModal } from './components/ReorderAlertModal';
 import { 
   Building2, 
   Store, 
@@ -35,7 +36,9 @@ const AppContent: React.FC = () => {
     notifications,
     removeNotification,
     setSelectedCustomer,
-    isAuthenticated
+    isAuthenticated,
+    isReorderAlertOpen,
+    setIsReorderAlertOpen
   } = usePharmacy();
 
   const [activeTab, setActiveTab] = useState<string>('network');
@@ -110,6 +113,11 @@ const AppContent: React.FC = () => {
       {/* Modals */}
       <AiAssistantModal />
       <ReceiptModal />
+      <ReorderAlertModal
+        isOpen={isReorderAlertOpen}
+        onClose={() => setIsReorderAlertOpen(false)}
+        onNavigateTab={(tab) => setActiveTab(tab)}
+      />
       
       {isRegisterBranchModalOpen && (
         <TenantsManager

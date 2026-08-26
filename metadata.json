@@ -1,6 +1,6 @@
 {
   "name": "PharmaCentral - Multi-Tenant Pharmacy Network",
   "description": "Centralized multi-tenant pharmacy management platform enabling pharmacy owners to manage inventory batches, point-of-sale dispensing, purchase orders, customer records, and AI-assisted stock forecasting across multiple pharmacy tenants.",
-  "requestFramePermissions": [],
+  "requestFramePermissions": ["microphone", "camera"],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

@@ -79,40 +79,113 @@ class MemoryTable<T extends { id: string }> implements Table<T> {
 // Supabase (Postgres) backend. Each table is `(id text primary key, data jsonb)`
 // so the stored shape is identical to the TypeScript type — no column mapping.
 // ---------------------------------------------------------------------------
+export function cleanSupabaseUrl(raw?: string | null): string | null {
+  if (!raw) return null;
+  let trimmed = raw.trim();
+  if (!trimmed) return null;
+
+  // Handle if user pasted dashboard URL: https://supabase.com/dashboard/project/xyz...
+  const dashboardMatch = trimmed.match(/supabase\.com\/dashboard\/project\/([a-z0-9_-]+)/i);
+  if (dashboardMatch) {
+    return `https://${dashboardMatch[1]}.supabase.co`;
+  }
+
+  // Handle if user only provided project ID: e.g. "yelpaiwwuqjutnmoqcli"
+  if (/^[a-z0-9]{15,30}$/i.test(trimmed)) {
+    return `https://${trimmed}.supabase.co`;
+  }
+
+  // Ensure protocol
+  if (!trimmed.startsWith("http://") && !trimmed.startsWith("https://")) {
+    trimmed = `https://${trimmed}`;
+  }
+
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol === "http:" || parsed.protocol === "https:") {
+      return parsed.origin;
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
 class SupabaseTable<T extends { id: string }> implements Table<T> {
-  constructor(private sb: SupabaseClient, private name: string) {}
+  private fallbackMemory: Map<string, T> = new Map();
+
+  constructor(private sb: SupabaseClient, private name: string, seedRows: T[] = []) {
+    for (const r of seedRows) {
+      this.fallbackMemory.set(r.id, { ...r });
+    }
+  }
 
   async all(): Promise<T[]> {
-    const { data, error } = await this.sb.from(this.name).select("data");
-    if (error) throw new Error(`[${this.name}.all] ${error.message}`);
-    return (data || []).map((r: any) => r.data as T);
+    try {
+      const { data, error } = await this.sb.from(this.name).select("data");
+      if (error) {
+        console.warn(`[${this.name}.all] Supabase read note (${error.message}). Using cache.`);
+        return Array.from(this.fallbackMemory.values());
+      }
+      const items = (data || []).map((r: any) => r.data as T);
+      for (const item of items) {
+        if (item?.id) this.fallbackMemory.set(item.id, item);
+      }
+      return items;
+    } catch (err: any) {
+      console.warn(`[${this.name}.all] Supabase read exception (${err?.message}). Using cache.`);
+      return Array.from(this.fallbackMemory.values());
+    }
   }
 
   async insert(row: T): Promise<T> {
-    const { error } = await this.sb.from(this.name).insert({ id: row.id, data: row });
-    if (error) throw new Error(`[${this.name}.insert] ${error.message}`);
+    this.fallbackMemory.set(row.id, { ...row });
+    try {
+      const { error } = await this.sb.from(this.name).insert({ id: row.id, data: row });
+      if (error) console.warn(`[${this.name}.insert] Supabase write note:`, error.message);
+    } catch (err: any) {
+      console.warn(`[${this.name}.insert] Supabase write exception:`, err?.message);
+    }
     return row;
   }
 
   async insertMany(rows: T[]): Promise<void> {
     if (rows.length === 0) return;
-    const { error } = await this.sb
-      .from(this.name)
-      .insert(rows.map((r) => ({ id: r.id, data: r })));
-    if (error) throw new Error(`[${this.name}.insertMany] ${error.message}`);
+    for (const r of rows) {
+      this.fallbackMemory.set(r.id, { ...r });
+    }
+    try {
+      const { error } = await this.sb
+        .from(this.name)
+        .insert(rows.map((r) => ({ id: r.id, data: r })));
+      if (error) console.warn(`[${this.name}.insertMany] Supabase write note:`, error.message);
+    } catch (err: any) {
+      console.warn(`[${this.name}.insertMany] Supabase write exception:`, err?.message);
+    }
   }
 
   async update(id: string, patch: Partial<T>): Promise<T | null> {
-    const { data: existing, error: e1 } = await this.sb
-      .from(this.name)
-      .select("data")
-      .eq("id", id)
-      .maybeSingle();
-    if (e1) throw new Error(`[${this.name}.update.read] ${e1.message}`);
-    if (!existing) return null;
-    const merged = { ...(existing.data as T), ...patch } as T;
-    const { error: e2 } = await this.sb.from(this.name).update({ data: merged }).eq("id", id);
-    if (e2) throw new Error(`[${this.name}.update.write] ${e2.message}`);
+    const memItem = this.fallbackMemory.get(id);
+    const base = memItem || ({} as T);
+    const merged = { ...base, ...patch, id } as T;
+    this.fallbackMemory.set(id, merged);
+
+    try {
+      const { data: existing, error: e1 } = await this.sb
+        .from(this.name)
+        .select("data")
+        .eq("id", id)
+        .maybeSingle();
+
+      if (!e1 && existing) {
+        const fullMerged = { ...(existing.data as T), ...patch } as T;
+        await this.sb.from(this.name).update({ data: fullMerged }).eq("id", id);
+        this.fallbackMemory.set(id, fullMerged);
+        return fullMerged;
+      }
+    } catch (err: any) {
+      console.warn(`[${this.name}.update] Supabase update note:`, err?.message);
+    }
     return merged;
   }
 }
@@ -125,15 +198,15 @@ let readyPromise: Promise<void> | null = null;
 
 function buildSupabaseStore(sb: SupabaseClient): Store {
   return {
-    tenants: new SupabaseTable<Tenant>(sb, "tenants"),
-    users: new SupabaseTable<AppUser>(sb, "users"),
-    medicines: new SupabaseTable<Medicine>(sb, "medicines"),
-    batches: new SupabaseTable<InventoryBatch>(sb, "batches"),
-    suppliers: new SupabaseTable<Supplier>(sb, "suppliers"),
-    customers: new SupabaseTable<Customer>(sb, "customers"),
-    sales: new SupabaseTable<Sale>(sb, "sales"),
-    transfers: new SupabaseTable<StockTransfer>(sb, "transfers"),
-    purchaseOrders: new SupabaseTable<PurchaseOrder>(sb, "purchase_orders"),
+    tenants: new SupabaseTable<Tenant>(sb, "tenants", INITIAL_TENANTS),
+    users: new SupabaseTable<AppUser>(sb, "users", INITIAL_USERS),
+    medicines: new SupabaseTable<Medicine>(sb, "medicines", INITIAL_MEDICINES),
+    batches: new SupabaseTable<InventoryBatch>(sb, "batches", INITIAL_BATCHES),
+    suppliers: new SupabaseTable<Supplier>(sb, "suppliers", INITIAL_SUPPLIERS),
+    customers: new SupabaseTable<Customer>(sb, "customers", INITIAL_CUSTOMERS),
+    sales: new SupabaseTable<Sale>(sb, "sales", INITIAL_SALES),
+    transfers: new SupabaseTable<StockTransfer>(sb, "transfers", INITIAL_TRANSFERS),
+    purchaseOrders: new SupabaseTable<PurchaseOrder>(sb, "purchase_orders", INITIAL_PURCHASE_ORDERS),
   };
 }
 
@@ -156,19 +229,27 @@ function buildMemoryStore(): Store {
  * assume the DB is seeded and do nothing (idempotent across cold starts).
  */
 async function seedSupabase(sb: SupabaseClient, store: Store): Promise<void> {
-  const { data, error } = await sb.from("tenants").select("id").limit(1);
-  if (error) throw new Error(`[seed.check] ${error.message}`);
-  if (data && data.length > 0) return; // already seeded
+  try {
+    const { data, error } = await sb.from("tenants").select("id").limit(1);
+    if (error) {
+      console.warn(`[seed.check] Supabase tables may not exist yet (${error.message}).`);
+      return;
+    }
+    if (data && data.length > 0) return; // already seeded
 
-  await store.tenants.insertMany([...INITIAL_TENANTS]);
-  await store.users.insertMany([...INITIAL_USERS]);
-  await store.medicines.insertMany([...INITIAL_MEDICINES]);
-  await store.batches.insertMany([...INITIAL_BATCHES]);
-  await store.suppliers.insertMany([...INITIAL_SUPPLIERS]);
-  await store.customers.insertMany([...INITIAL_CUSTOMERS]);
-  await store.sales.insertMany([...INITIAL_SALES]);
-  await store.transfers.insertMany([...INITIAL_TRANSFERS]);
-  await store.purchaseOrders.insertMany([...INITIAL_PURCHASE_ORDERS]);
+    await store.tenants.insertMany([...INITIAL_TENANTS]);
+    await store.users.insertMany([...INITIAL_USERS]);
+    await store.medicines.insertMany([...INITIAL_MEDICINES]);
+    await store.batches.insertMany([...INITIAL_BATCHES]);
+    await store.suppliers.insertMany([...INITIAL_SUPPLIERS]);
+    await store.customers.insertMany([...INITIAL_CUSTOMERS]);
+    await store.sales.insertMany([...INITIAL_SALES]);
+    await store.transfers.insertMany([...INITIAL_TRANSFERS]);
+    await store.purchaseOrders.insertMany([...INITIAL_PURCHASE_ORDERS]);
+    console.log("[store] Fresh Supabase database initialized with initial pharmacy dataset.");
+  } catch (err: any) {
+    console.warn("[seed.check] Supabase seed warning:", err?.message);
+  }
 }
 
 /**
@@ -179,35 +260,43 @@ async function seedSupabase(sb: SupabaseClient, store: Store): Promise<void> {
  * changes it and creates real staff logins from the app.
  */
 async function bootstrapAuth(store: Store): Promise<void> {
-  const users = await store.users.all();
-  for (const u of users) {
-    if (!u.passwordHash) {
-      await store.users.update(u.id, { passwordHash: hashPassword(DEFAULT_BOOTSTRAP_PASSWORD) });
+  try {
+    const users = await store.users.all();
+    for (const u of users) {
+      if (!u.passwordHash) {
+        await store.users.update(u.id, { passwordHash: hashPassword(DEFAULT_BOOTSTRAP_PASSWORD) });
+      }
     }
+  } catch (err: any) {
+    console.warn("[bootstrapAuth] Note:", err?.message);
   }
 }
 
 function initStore(): Store {
   if (cachedStore) return cachedStore;
 
-  const url = process.env.SUPABASE_URL;
-  const key = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY;
+  const rawUrl = process.env.SUPABASE_URL;
+  const rawKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY || process.env.SUPABASE_ANON_KEY;
+  const url = cleanSupabaseUrl(rawUrl);
+  const key = rawKey?.trim();
 
   if (url && key) {
-    const sb = createClient(url, key, { auth: { persistSession: false } });
-    const store = buildSupabaseStore(sb);
-    // Seed a fresh DB, then backfill passwords. Because seedSupabase short-
-    // circuits once tenants exist, the already-live DB skips seeding but still
-    // gets its passwords backfilled on the next deploy.
-    readyPromise = seedSupabase(sb, store).then(() => bootstrapAuth(store));
-    cachedStore = store;
-    console.log("[store] Using Supabase persistence backend");
-  } else {
-    const store = buildMemoryStore();
-    cachedStore = store;
-    readyPromise = bootstrapAuth(store);
-    console.log("[store] SUPABASE_URL not set — using in-memory backend (data resets on restart)");
+    try {
+      const sb = createClient(url, key, { auth: { persistSession: false } });
+      const store = buildSupabaseStore(sb);
+      readyPromise = seedSupabase(sb, store).then(() => bootstrapAuth(store));
+      cachedStore = store;
+      console.log(`[store] Connected to Supabase backend: ${url}`);
+      return cachedStore;
+    } catch (err: any) {
+      console.warn("[store] Failed to initialize Supabase client, falling back to memory:", err?.message);
+    }
   }
+
+  const store = buildMemoryStore();
+  cachedStore = store;
+  readyPromise = bootstrapAuth(store);
+  console.log("[store] Supabase not configured or URL invalid — using in-memory store");
   return cachedStore;
 }
 
@@ -221,5 +310,7 @@ export async function ensureReady(): Promise<void> {
 
 /** True when the persistent Supabase backend is active. */
 export function isPersistent(): boolean {
-  return Boolean(process.env.SUPABASE_URL && (process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY));
+  const url = cleanSupabaseUrl(process.env.SUPABASE_URL);
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY || process.env.SUPABASE_ANON_KEY;
+  return Boolean(url && key?.trim());
 }

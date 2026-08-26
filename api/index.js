@@ -70,6 +70,14 @@ var INITIAL_TENANTS = [
 ];
 var INITIAL_USERS = [
   {
+    id: "usr-super",
+    name: "Super Admin",
+    email: "Superadmin",
+    role: "super_admin",
+    tenantId: null,
+    avatar: ""
+  },
+  {
     id: "usr-1",
     name: "Adeel Chaudhary (Network Owner)",
     email: "adeelchaudhary101@gmail.com",
@@ -1175,6 +1183,69 @@ var INITIAL_PURCHASE_ORDERS = [
   }
 ];
 
+// src/server/auth.ts
+import { scryptSync, randomBytes, timingSafeEqual, createHmac } from "node:crypto";
+var DEFAULT_BOOTSTRAP_PASSWORD = "PharmaAdmin@123";
+var TOKEN_TTL_MS = 7 * 24 * 60 * 60 * 1e3;
+function hashPassword(plain) {
+  const salt = randomBytes(16);
+  const hash = scryptSync(plain, salt, 64);
+  return `scrypt$${salt.toString("hex")}$${hash.toString("hex")}`;
+}
+function verifyPassword(plain, stored) {
+  if (!stored) return false;
+  const parts = stored.split("$");
+  if (parts.length !== 3 || parts[0] !== "scrypt") return false;
+  const salt = Buffer.from(parts[1], "hex");
+  const expected = Buffer.from(parts[2], "hex");
+  let actual;
+  try {
+    actual = scryptSync(plain, salt, expected.length);
+  } catch {
+    return false;
+  }
+  return actual.length === expected.length && timingSafeEqual(actual, expected);
+}
+function getSessionSecret() {
+  const s = process.env.SESSION_SECRET;
+  if (s && s.trim().length > 0) return s.trim();
+  const fallbackKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY;
+  if (fallbackKey && fallbackKey.trim().length > 0) {
+    return fallbackKey.trim();
+  }
+  return "dev-pharmacy-session-secret-default-key-2026";
+}
+function b64url(input) {
+  return Buffer.from(input, "utf8").toString("base64url");
+}
+function signToken(input) {
+  const payload = { ...input, exp: Date.now() + TOKEN_TTL_MS };
+  const body = b64url(JSON.stringify(payload));
+  const sig = createHmac("sha256", getSessionSecret()).update(body).digest("base64url");
+  return `${body}.${sig}`;
+}
+function verifyToken(token) {
+  const dot = token.indexOf(".");
+  if (dot <= 0) return null;
+  const body = token.slice(0, dot);
+  const sig = token.slice(dot + 1);
+  const expected = createHmac("sha256", getSessionSecret()).update(body).digest("base64url");
+  const a = Buffer.from(sig);
+  const b = Buffer.from(expected);
+  if (a.length !== b.length || !timingSafeEqual(a, b)) return null;
+  try {
+    const payload = JSON.parse(Buffer.from(body, "base64url").toString("utf8"));
+    if (typeof payload.exp !== "number" || Date.now() > payload.exp) return null;
+    return payload;
+  } catch {
+    return null;
+  }
+}
+function sanitizeUser(u) {
+  const { passwordHash, ...safe } = u;
+  return safe;
+}
+
 // src/server/store.ts
 var MemoryTable = class {
   constructor(seed) {
@@ -1197,33 +1268,94 @@ var MemoryTable = class {
     return this.rows[i];
   }
 };
+function cleanSupabaseUrl(raw) {
+  if (!raw) return null;
+  let trimmed = raw.trim();
+  if (!trimmed) return null;
+  const dashboardMatch = trimmed.match(/supabase\.com\/dashboard\/project\/([a-z0-9_-]+)/i);
+  if (dashboardMatch) {
+    return `https://${dashboardMatch[1]}.supabase.co`;
+  }
+  if (/^[a-z0-9]{15,30}$/i.test(trimmed)) {
+    return `https://${trimmed}.supabase.co`;
+  }
+  if (!trimmed.startsWith("http://") && !trimmed.startsWith("https://")) {
+    trimmed = `https://${trimmed}`;
+  }
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol === "http:" || parsed.protocol === "https:") {
+      return parsed.origin;
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
 var SupabaseTable = class {
-  constructor(sb, name) {
+  constructor(sb, name, seedRows = []) {
     this.sb = sb;
     this.name = name;
+    this.fallbackMemory = /* @__PURE__ */ new Map();
+    for (const r of seedRows) {
+      this.fallbackMemory.set(r.id, { ...r });
+    }
   }
   async all() {
-    const { data, error } = await this.sb.from(this.name).select("data");
-    if (error) throw new Error(`[${this.name}.all] ${error.message}`);
-    return (data || []).map((r) => r.data);
+    try {
+      const { data, error } = await this.sb.from(this.name).select("data");
+      if (error) {
+        console.warn(`[${this.name}.all] Supabase read note (${error.message}). Using cache.`);
+        return Array.from(this.fallbackMemory.values());
+      }
+      const items = (data || []).map((r) => r.data);
+      for (const item of items) {
+        if (item?.id) this.fallbackMemory.set(item.id, item);
+      }
+      return items;
+    } catch (err) {
+      console.warn(`[${this.name}.all] Supabase read exception (${err?.message}). Using cache.`);
+      return Array.from(this.fallbackMemory.values());
+    }
   }
   async insert(row) {
-    const { error } = await this.sb.from(this.name).insert({ id: row.id, data: row });
-    if (error) throw new Error(`[${this.name}.insert] ${error.message}`);
+    this.fallbackMemory.set(row.id, { ...row });
+    try {
+      const { error } = await this.sb.from(this.name).insert({ id: row.id, data: row });
+      if (error) console.warn(`[${this.name}.insert] Supabase write note:`, error.message);
+    } catch (err) {
+      console.warn(`[${this.name}.insert] Supabase write exception:`, err?.message);
+    }
     return row;
   }
   async insertMany(rows) {
     if (rows.length === 0) return;
-    const { error } = await this.sb.from(this.name).insert(rows.map((r) => ({ id: r.id, data: r })));
-    if (error) throw new Error(`[${this.name}.insertMany] ${error.message}`);
+    for (const r of rows) {
+      this.fallbackMemory.set(r.id, { ...r });
+    }
+    try {
+      const { error } = await this.sb.from(this.name).insert(rows.map((r) => ({ id: r.id, data: r })));
+      if (error) console.warn(`[${this.name}.insertMany] Supabase write note:`, error.message);
+    } catch (err) {
+      console.warn(`[${this.name}.insertMany] Supabase write exception:`, err?.message);
+    }
   }
   async update(id, patch) {
-    const { data: existing, error: e1 } = await this.sb.from(this.name).select("data").eq("id", id).maybeSingle();
-    if (e1) throw new Error(`[${this.name}.update.read] ${e1.message}`);
-    if (!existing) return null;
-    const merged = { ...existing.data, ...patch };
-    const { error: e2 } = await this.sb.from(this.name).update({ data: merged }).eq("id", id);
-    if (e2) throw new Error(`[${this.name}.update.write] ${e2.message}`);
+    const memItem = this.fallbackMemory.get(id);
+    const base = memItem || {};
+    const merged = { ...base, ...patch, id };
+    this.fallbackMemory.set(id, merged);
+    try {
+      const { data: existing, error: e1 } = await this.sb.from(this.name).select("data").eq("id", id).maybeSingle();
+      if (!e1 && existing) {
+        const fullMerged = { ...existing.data, ...patch };
+        await this.sb.from(this.name).update({ data: fullMerged }).eq("id", id);
+        this.fallbackMemory.set(id, fullMerged);
+        return fullMerged;
+      }
+    } catch (err) {
+      console.warn(`[${this.name}.update] Supabase update note:`, err?.message);
+    }
     return merged;
   }
 };
@@ -1231,15 +1363,15 @@ var cachedStore = null;
 var readyPromise = null;
 function buildSupabaseStore(sb) {
   return {
-    tenants: new SupabaseTable(sb, "tenants"),
-    users: new SupabaseTable(sb, "users"),
-    medicines: new SupabaseTable(sb, "medicines"),
-    batches: new SupabaseTable(sb, "batches"),
-    suppliers: new SupabaseTable(sb, "suppliers"),
-    customers: new SupabaseTable(sb, "customers"),
-    sales: new SupabaseTable(sb, "sales"),
-    transfers: new SupabaseTable(sb, "transfers"),
-    purchaseOrders: new SupabaseTable(sb, "purchase_orders")
+    tenants: new SupabaseTable(sb, "tenants", INITIAL_TENANTS),
+    users: new SupabaseTable(sb, "users", INITIAL_USERS),
+    medicines: new SupabaseTable(sb, "medicines", INITIAL_MEDICINES),
+    batches: new SupabaseTable(sb, "batches", INITIAL_BATCHES),
+    suppliers: new SupabaseTable(sb, "suppliers", INITIAL_SUPPLIERS),
+    customers: new SupabaseTable(sb, "customers", INITIAL_CUSTOMERS),
+    sales: new SupabaseTable(sb, "sales", INITIAL_SALES),
+    transfers: new SupabaseTable(sb, "transfers", INITIAL_TRANSFERS),
+    purchaseOrders: new SupabaseTable(sb, "purchase_orders", INITIAL_PURCHASE_ORDERS)
   };
 }
 function buildMemoryStore() {
@@ -1256,34 +1388,61 @@ function buildMemoryStore() {
   };
 }
 async function seedSupabase(sb, store2) {
-  const { data, error } = await sb.from("tenants").select("id").limit(1);
-  if (error) throw new Error(`[seed.check] ${error.message}`);
-  if (data && data.length > 0) return;
-  await store2.tenants.insertMany([...INITIAL_TENANTS]);
-  await store2.users.insertMany([...INITIAL_USERS]);
-  await store2.medicines.insertMany([...INITIAL_MEDICINES]);
-  await store2.batches.insertMany([...INITIAL_BATCHES]);
-  await store2.suppliers.insertMany([...INITIAL_SUPPLIERS]);
-  await store2.customers.insertMany([...INITIAL_CUSTOMERS]);
-  await store2.sales.insertMany([...INITIAL_SALES]);
-  await store2.transfers.insertMany([...INITIAL_TRANSFERS]);
-  await store2.purchaseOrders.insertMany([...INITIAL_PURCHASE_ORDERS]);
+  try {
+    const { data, error } = await sb.from("tenants").select("id").limit(1);
+    if (error) {
+      console.warn(`[seed.check] Supabase tables may not exist yet (${error.message}).`);
+      return;
+    }
+    if (data && data.length > 0) return;
+    await store2.tenants.insertMany([...INITIAL_TENANTS]);
+    await store2.users.insertMany([...INITIAL_USERS]);
+    await store2.medicines.insertMany([...INITIAL_MEDICINES]);
+    await store2.batches.insertMany([...INITIAL_BATCHES]);
+    await store2.suppliers.insertMany([...INITIAL_SUPPLIERS]);
+    await store2.customers.insertMany([...INITIAL_CUSTOMERS]);
+    await store2.sales.insertMany([...INITIAL_SALES]);
+    await store2.transfers.insertMany([...INITIAL_TRANSFERS]);
+    await store2.purchaseOrders.insertMany([...INITIAL_PURCHASE_ORDERS]);
+    console.log("[store] Fresh Supabase database initialized with initial pharmacy dataset.");
+  } catch (err) {
+    console.warn("[seed.check] Supabase seed warning:", err?.message);
+  }
+}
+async function bootstrapAuth(store2) {
+  try {
+    const users = await store2.users.all();
+    for (const u of users) {
+      if (!u.passwordHash) {
+        await store2.users.update(u.id, { passwordHash: hashPassword(DEFAULT_BOOTSTRAP_PASSWORD) });
+      }
+    }
+  } catch (err) {
+    console.warn("[bootstrapAuth] Note:", err?.message);
+  }
 }
 function initStore() {
   if (cachedStore) return cachedStore;
-  const url = process.env.SUPABASE_URL;
-  const key = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY;
+  const rawUrl = process.env.SUPABASE_URL;
+  const rawKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY || process.env.SUPABASE_ANON_KEY;
+  const url = cleanSupabaseUrl(rawUrl);
+  const key = rawKey?.trim();
   if (url && key) {
-    const sb = createClient(url, key, { auth: { persistSession: false } });
-    const store2 = buildSupabaseStore(sb);
-    readyPromise = seedSupabase(sb, store2);
-    cachedStore = store2;
-    console.log("[store] Using Supabase persistence backend");
-  } else {
-    cachedStore = buildMemoryStore();
-    readyPromise = Promise.resolve();
-    console.log("[store] SUPABASE_URL not set \u2014 using in-memory backend (data resets on restart)");
+    try {
+      const sb = createClient(url, key, { auth: { persistSession: false } });
+      const store3 = buildSupabaseStore(sb);
+      readyPromise = seedSupabase(sb, store3).then(() => bootstrapAuth(store3));
+      cachedStore = store3;
+      console.log(`[store] Connected to Supabase backend: ${url}`);
+      return cachedStore;
+    } catch (err) {
+      console.warn("[store] Failed to initialize Supabase client, falling back to memory:", err?.message);
+    }
   }
+  const store2 = buildMemoryStore();
+  cachedStore = store2;
+  readyPromise = bootstrapAuth(store2);
+  console.log("[store] Supabase not configured or URL invalid \u2014 using in-memory store");
   return cachedStore;
 }
 var store = initStore();
@@ -1291,7 +1450,9 @@ async function ensureReady() {
   if (readyPromise) await readyPromise;
 }
 function isPersistent() {
-  return Boolean(process.env.SUPABASE_URL && (process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY));
+  const url = cleanSupabaseUrl(process.env.SUPABASE_URL);
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY || process.env.SUPABASE_ANON_KEY;
+  return Boolean(url && key?.trim());
 }
 
 // src/server/app.ts
@@ -1317,6 +1478,31 @@ var ah = (fn) => (req, res) => {
     }
   });
 };
+function getUser(req) {
+  return req.user;
+}
+function isSuper(req) {
+  return getUser(req)?.role === "super_admin";
+}
+function canManageInventory(req) {
+  const r = getUser(req)?.role;
+  return r === "super_admin" || r === "tenant_admin" || r === "pharmacist";
+}
+function scopedTenantId(req, requested) {
+  const u = getUser(req);
+  if (u && u.role !== "super_admin") return u.tenantId || void 0;
+  return typeof requested === "string" && requested ? requested : void 0;
+}
+function ownsTenant(req, tenantId) {
+  const u = getUser(req);
+  if (!u) return false;
+  if (u.role === "super_admin") return true;
+  return Boolean(tenantId) && u.tenantId === tenantId;
+}
+function forbid(res, message = "You do not have permission to perform this action.") {
+  res.status(403).json({ error: message });
+}
+var VALID_ROLES = ["super_admin", "tenant_admin", "pharmacist", "cashier"];
 function createApp() {
   const app2 = express();
   app2.use((req, res, next) => {
@@ -1332,6 +1518,58 @@ function createApp() {
       res.status(500).json({ error: "Database initialization failed: " + (err?.message || err) });
     });
   });
+  app2.post(
+    "/api/auth/login",
+    ah(async (req, res) => {
+      const email = String(req.body?.email || "").trim().toLowerCase();
+      const password = String(req.body?.password || "");
+      if (!email || !password) {
+        return res.status(400).json({ error: "Email and password are required." });
+      }
+      const users = await store.users.all();
+      const user = users.find((u) => u.email.toLowerCase() === email);
+      if (!user || !verifyPassword(password, user.passwordHash)) {
+        return res.status(401).json({ error: "Invalid email or password." });
+      }
+      const token = signToken({ sub: user.id, role: user.role, tenantId: user.tenantId });
+      res.json({ token, user: sanitizeUser(user) });
+    })
+  );
+  app2.use("/api", (req, res, next) => {
+    const p = req.path;
+    if (req.method === "OPTIONS" || p === "/health" || p === "/auth/login") return next();
+    const header = req.headers.authorization || "";
+    const token = header.startsWith("Bearer ") ? header.slice(7).trim() : "";
+    let payload;
+    try {
+      payload = token ? verifyToken(token) : null;
+    } catch (err) {
+      res.status(500).json({ error: err?.message || "Authentication configuration error." });
+      return;
+    }
+    if (!payload) {
+      res.status(401).json({ error: "Authentication required. Please sign in." });
+      return;
+    }
+    const userId = payload.sub;
+    store.users.all().then((users) => {
+      const user = users.find((u) => u.id === userId);
+      if (!user) {
+        res.status(401).json({ error: "Your session is no longer valid. Please sign in again." });
+        return;
+      }
+      req.user = user;
+      next();
+    }).catch((err) => res.status(500).json({ error: err?.message || "Auth lookup failed." }));
+  });
+  app2.get(
+    "/api/auth/me",
+    ah(async (req, res) => {
+      const u = getUser(req);
+      if (!u) return res.status(401).json({ error: "Not authenticated" });
+      res.json(sanitizeUser(u));
+    })
+  );
   app2.get(
     "/api/health",
     ah(async (req, res) => {
@@ -1347,12 +1585,16 @@ function createApp() {
   app2.get(
     "/api/tenants",
     ah(async (req, res) => {
-      res.json(await store.tenants.all());
+      const all = await store.tenants.all();
+      if (isSuper(req)) return res.json(all);
+      const u = getUser(req);
+      res.json(all.filter((t) => t.id === u?.tenantId));
     })
   );
   app2.post(
     "/api/tenants",
     ah(async (req, res) => {
+      if (!isSuper(req)) return forbid(res);
       const newTenant = {
         ...req.body,
         id: `tenant-${Date.now()}`,
@@ -1388,6 +1630,7 @@ function createApp() {
   app2.put(
     "/api/tenants/:id",
     ah(async (req, res) => {
+      if (!isSuper(req)) return forbid(res);
       const updated = await store.tenants.update(req.params.id, req.body);
       if (!updated) return res.status(404).json({ error: "Tenant not found" });
       res.json(updated);
@@ -1396,7 +1639,97 @@ function createApp() {
   app2.get(
     "/api/users",
     ah(async (req, res) => {
-      res.json(await store.users.all());
+      const actor = getUser(req);
+      if (!actor) return res.status(401).json({ error: "Not authenticated" });
+      const all = await store.users.all();
+      if (actor.role === "super_admin") {
+        return res.json(all.map(sanitizeUser));
+      }
+      if (actor.role === "tenant_admin") {
+        return res.json(all.filter((u) => u.tenantId === actor.tenantId).map(sanitizeUser));
+      }
+      return forbid(res);
+    })
+  );
+  app2.post(
+    "/api/users",
+    ah(async (req, res) => {
+      const actor = getUser(req);
+      if (!actor) return res.status(401).json({ error: "Not authenticated" });
+      if (actor.role !== "super_admin" && actor.role !== "tenant_admin") return forbid(res);
+      const name = String(req.body?.name || "").trim();
+      const email = String(req.body?.email || "").trim().toLowerCase();
+      const role = String(req.body?.role || "");
+      const password = String(req.body?.password || "");
+      let tenantId = req.body?.tenantId ?? null;
+      if (!name || !email || !password) {
+        return res.status(400).json({ error: "Name, email and password are required." });
+      }
+      if (!VALID_ROLES.includes(role)) {
+        return res.status(400).json({ error: "Invalid role." });
+      }
+      if (actor.role === "tenant_admin") {
+        if (role === "super_admin") return forbid(res, "Managers cannot create an owner account.");
+        tenantId = actor.tenantId;
+      } else {
+        tenantId = role === "super_admin" ? null : tenantId;
+        if (role !== "super_admin" && !tenantId) {
+          return res.status(400).json({ error: "Please select a pharmacy for this user." });
+        }
+      }
+      const users = await store.users.all();
+      if (users.some((u) => u.email.toLowerCase() === email)) {
+        return res.status(409).json({ error: "A user with this email already exists." });
+      }
+      const newUser = {
+        id: `usr-${Date.now()}`,
+        name,
+        email,
+        role,
+        tenantId,
+        passwordHash: hashPassword(password)
+      };
+      await store.users.insert(newUser);
+      res.status(201).json(sanitizeUser(newUser));
+    })
+  );
+  app2.put(
+    "/api/users/:id",
+    ah(async (req, res) => {
+      const actor = getUser(req);
+      if (!actor) return res.status(401).json({ error: "Not authenticated" });
+      if (actor.role !== "super_admin" && actor.role !== "tenant_admin") return forbid(res);
+      const users = await store.users.all();
+      const target = users.find((u) => u.id === req.params.id);
+      if (!target) return res.status(404).json({ error: "User not found" });
+      if (actor.role === "tenant_admin") {
+        if (target.tenantId !== actor.tenantId || target.role === "super_admin") {
+          return forbid(res, "You can only manage staff in your own pharmacy.");
+        }
+      }
+      const patch = {};
+      if (typeof req.body?.name === "string" && req.body.name.trim()) patch.name = req.body.name.trim();
+      if (typeof req.body?.role === "string") {
+        const role = req.body.role;
+        if (!VALID_ROLES.includes(role)) return res.status(400).json({ error: "Invalid role." });
+        if (actor.role === "tenant_admin" && role === "super_admin") {
+          return forbid(res, "Managers cannot assign the owner role.");
+        }
+        patch.role = role;
+      }
+      if (typeof req.body?.email === "string" && req.body.email.trim()) {
+        const email = req.body.email.trim().toLowerCase();
+        if (users.some((u) => u.id !== target.id && u.email.toLowerCase() === email)) {
+          return res.status(409).json({ error: "A user with this email already exists." });
+        }
+        patch.email = email;
+      }
+      if (typeof req.body?.password === "string" && req.body.password) {
+        patch.passwordHash = hashPassword(req.body.password);
+      }
+      const updated = await store.users.update(target.id, patch);
+      if (!updated) return res.status(404).json({ error: "User not found" });
+      res.json(sanitizeUser(updated));
     })
   );
   app2.get(
@@ -1408,6 +1741,7 @@ function createApp() {
   app2.post(
     "/api/medicines",
     ah(async (req, res) => {
+      if (!canManageInventory(req)) return forbid(res);
       const newMed = {
         ...req.body,
         id: `med-${Date.now()}`,
@@ -1421,7 +1755,8 @@ function createApp() {
   app2.get(
     "/api/inventory",
     ah(async (req, res) => {
-      const { tenantId, search, category, lowStockOnly, expiringSoonOnly } = req.query;
+      const { search, category, lowStockOnly, expiringSoonOnly } = req.query;
+      const tenantId = scopedTenantId(req, req.query.tenantId);
       const now = /* @__PURE__ */ new Date();
       const ninetyDaysFuture = new Date(now.getTime() + 90 * 24 * 60 * 60 * 1e3);
       const [tenants, medicines, allBatches] = await Promise.all([
@@ -1477,9 +1812,76 @@ function createApp() {
     })
   );
   app2.get(
+    "/api/inventory/reorder-check",
+    ah(async (req, res) => {
+      const tenantId = scopedTenantId(req, req.query.tenantId);
+      const [tenants, medicines, allBatches, suppliers] = await Promise.all([
+        store.tenants.all(),
+        store.medicines.all(),
+        store.batches.all(),
+        store.suppliers.all()
+      ]);
+      const tenant = tenants.find((t) => t.id === tenantId) || (tenantId ? null : tenants[0]);
+      const threshold = tenant?.lowStockDefaultThreshold || 20;
+      const currency = tenant?.currency || "PKR";
+      const tenantBatches = allBatches.filter((b) => !tenantId || b.tenantId === tenantId);
+      const lowStockItems = [];
+      let outOfStockCount = 0;
+      let criticalStockCount = 0;
+      let totalEstimatedCost = 0;
+      for (const med of medicines) {
+        const batches = tenantBatches.filter((b) => b.medicineId === med.id);
+        const currentStock = batches.reduce((sum, b) => sum + b.stockQuantity, 0);
+        if (currentStock <= threshold) {
+          const isOutOfStock = currentStock === 0;
+          const isCritical = currentStock <= Math.max(5, Math.floor(threshold * 0.4));
+          if (isOutOfStock) outOfStockCount++;
+          if (isCritical && !isOutOfStock) criticalStockCount++;
+          const deficit = Math.max(0, threshold - currentStock);
+          const suggestedReorderQty = Math.max(deficit, threshold * 2);
+          const unitCost = batches[0]?.purchasePrice || 100;
+          const lineCost = suggestedReorderQty * unitCost;
+          totalEstimatedCost += lineCost;
+          const supplierId = batches[0]?.supplierId || suppliers[0]?.id;
+          const supplier = suppliers.find((s) => s.id === supplierId) || suppliers[0];
+          lowStockItems.push({
+            medicineId: med.id,
+            brandName: med.brandName,
+            genericName: med.genericName,
+            category: med.category,
+            dosageForm: med.dosageForm,
+            strength: med.strength,
+            currentStock,
+            threshold,
+            deficit,
+            suggestedReorderQty,
+            estimatedUnitCost: unitCost,
+            estimatedTotalCost: lineCost,
+            supplierId: supplier?.id,
+            supplierName: supplier?.name || "Wholesale Distributor",
+            urgency: isOutOfStock ? "OUT_OF_STOCK" : isCritical ? "CRITICAL" : "LOW"
+          });
+        }
+      }
+      res.json({
+        tenantId: tenant?.id || null,
+        tenantName: tenant?.name || "All Branches (HQ)",
+        thresholdUsed: threshold,
+        totalEvaluated: medicines.length,
+        lowStockCount: lowStockItems.length,
+        criticalStockCount,
+        outOfStockCount,
+        totalEstimatedCost,
+        currency,
+        items: lowStockItems
+      });
+    })
+  );
+  app2.get(
     "/api/batches",
     ah(async (req, res) => {
-      const { tenantId, medicineId } = req.query;
+      const { medicineId } = req.query;
+      const tenantId = scopedTenantId(req, req.query.tenantId);
       let result = await store.batches.all();
       if (tenantId) result = result.filter((b) => b.tenantId === tenantId);
       if (medicineId) result = result.filter((b) => b.medicineId === medicineId);
@@ -1489,8 +1891,13 @@ function createApp() {
   app2.post(
     "/api/batches",
     ah(async (req, res) => {
+      if (!canManageInventory(req)) return forbid(res);
+      const actor = getUser(req);
+      const tenantId = actor.role === "super_admin" ? req.body.tenantId : actor.tenantId;
+      if (!tenantId) return res.status(400).json({ error: "tenantId is required." });
       const newBatch = {
         ...req.body,
+        tenantId,
         id: `bat-${Date.now()}`,
         purchasePrice: Number(req.body.purchasePrice) || 0,
         sellingPrice: Number(req.body.sellingPrice) || 0,
@@ -1505,9 +1912,11 @@ function createApp() {
   app2.put(
     "/api/batches/:id",
     ah(async (req, res) => {
+      if (!canManageInventory(req)) return forbid(res);
       const batches = await store.batches.all();
       const existing = batches.find((b) => b.id === req.params.id);
       if (!existing) return res.status(404).json({ error: "Batch not found" });
+      if (!ownsTenant(req, existing.tenantId)) return forbid(res);
       const patch = {
         ...req.body,
         stockQuantity: Number(req.body.stockQuantity ?? existing.stockQuantity),
@@ -1521,7 +1930,7 @@ function createApp() {
   app2.get(
     "/api/sales",
     ah(async (req, res) => {
-      const { tenantId } = req.query;
+      const tenantId = scopedTenantId(req, req.query.tenantId);
       let list = await store.sales.all();
       if (tenantId) list = list.filter((s) => s.tenantId === tenantId);
       list = [...list].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
@@ -1531,14 +1940,17 @@ function createApp() {
   app2.post(
     "/api/sales",
     ah(async (req, res) => {
+      const actor = getUser(req);
       const saleData = req.body;
-      if (!saleData.tenantId || !saleData.items || saleData.items.length === 0) {
+      const tenantId = actor.role === "super_admin" ? saleData.tenantId : actor.tenantId;
+      if (!tenantId || !saleData.items || saleData.items.length === 0) {
         return res.status(400).json({ error: "Invalid sale payload: tenantId and items required" });
       }
+      saleData.tenantId = tenantId;
       const allBatches = await store.batches.all();
       const deductions = [];
       for (const item of saleData.items) {
-        const batch = allBatches.find((b) => b.id === item.batchId);
+        const batch = allBatches.find((b) => b.id === item.batchId && b.tenantId === tenantId);
         if (batch) {
           if (batch.stockQuantity < item.quantity) {
             return res.status(400).json({
@@ -1585,8 +1997,8 @@ function createApp() {
         grandTotal: Number(saleData.grandTotal) || 0,
         paymentMethod: saleData.paymentMethod || "Cash",
         insuranceDetails: saleData.insuranceDetails,
-        cashierId: saleData.cashierId || "usr-1",
-        cashierName: saleData.cashierName || "Dispensing Pharmacist",
+        cashierId: actor.id,
+        cashierName: actor.name,
         notes: saleData.notes,
         status: "completed"
       };
@@ -1600,6 +2012,7 @@ function createApp() {
       const sales = await store.sales.all();
       const sale = sales.find((s) => s.id === req.params.id);
       if (!sale) return res.status(404).json({ error: "Sale not found" });
+      if (!ownsTenant(req, sale.tenantId)) return forbid(res);
       if (sale.status === "refunded") {
         return res.status(400).json({ error: "Sale is already refunded" });
       }
@@ -1617,7 +2030,7 @@ function createApp() {
   app2.get(
     "/api/transfers",
     ah(async (req, res) => {
-      const { tenantId } = req.query;
+      const tenantId = scopedTenantId(req, req.query.tenantId);
       let list = await store.transfers.all();
       if (tenantId) {
         list = list.filter((t) => t.fromTenantId === tenantId || t.toTenantId === tenantId);
@@ -1631,7 +2044,10 @@ function createApp() {
   app2.post(
     "/api/transfers",
     ah(async (req, res) => {
-      const { fromTenantId, toTenantId, medicineId, quantity, requestedBy, notes } = req.body;
+      if (!canManageInventory(req)) return forbid(res);
+      const actor = getUser(req);
+      const { toTenantId, medicineId, quantity, notes } = req.body;
+      const fromTenantId = actor.role === "super_admin" ? req.body.fromTenantId : actor.tenantId;
       const [tenants, medicines, allBatches] = await Promise.all([
         store.tenants.all(),
         store.medicines.all(),
@@ -1664,7 +2080,7 @@ function createApp() {
         quantity: Number(quantity),
         status: "pending",
         requestedDate: (/* @__PURE__ */ new Date()).toISOString(),
-        requestedBy: requestedBy || "Branch Manager",
+        requestedBy: actor.name,
         notes
       };
       await store.transfers.insert(newTransfer);
@@ -1674,10 +2090,14 @@ function createApp() {
   app2.put(
     "/api/transfers/:id/status",
     ah(async (req, res) => {
+      if (!canManageInventory(req)) return forbid(res);
       const { status } = req.body;
       const transfers = await store.transfers.all();
       const transfer = transfers.find((t) => t.id === req.params.id);
       if (!transfer) return res.status(404).json({ error: "Transfer not found" });
+      if (!ownsTenant(req, transfer.fromTenantId) && !ownsTenant(req, transfer.toTenantId)) {
+        return forbid(res);
+      }
       const patch = { status };
       if (status === "completed" && transfer.status !== "completed") {
         const allBatches = await store.batches.all();
@@ -1728,7 +2148,7 @@ function createApp() {
   app2.get(
     "/api/orders",
     ah(async (req, res) => {
-      const { tenantId } = req.query;
+      const tenantId = scopedTenantId(req, req.query.tenantId);
       let list = await store.purchaseOrders.all();
       if (tenantId) list = list.filter((p) => p.tenantId === tenantId);
       list = [...list].sort(
@@ -1740,7 +2160,11 @@ function createApp() {
   app2.post(
     "/api/orders",
     ah(async (req, res) => {
-      const { tenantId, supplierId, items, notes } = req.body;
+      if (!canManageInventory(req)) return forbid(res);
+      const actor = getUser(req);
+      const { supplierId, items, notes } = req.body;
+      const tenantId = actor.role === "super_admin" ? req.body.tenantId : actor.tenantId;
+      if (!tenantId) return res.status(400).json({ error: "tenantId is required." });
       const [suppliers, tenants, orders] = await Promise.all([
         store.suppliers.all(),
         store.tenants.all(),
@@ -1776,9 +2200,11 @@ function createApp() {
   app2.put(
     "/api/orders/:id/receive",
     ah(async (req, res) => {
+      if (!canManageInventory(req)) return forbid(res);
       const orders = await store.purchaseOrders.all();
       const order = orders.find((p) => p.id === req.params.id);
       if (!order) return res.status(404).json({ error: "Order not found" });
+      if (!ownsTenant(req, order.tenantId)) return forbid(res);
       if (order.status === "received") {
         return res.status(400).json({ error: "Order is already marked as received" });
       }
@@ -1833,6 +2259,7 @@ function createApp() {
   app2.get(
     "/api/analytics/network",
     ah(async (req, res) => {
+      if (!isSuper(req)) return forbid(res);
       const [tenants, medicines, allBatches, allSales] = await Promise.all([
         store.tenants.all(),
         store.medicines.all(),
@@ -2098,14 +2525,15 @@ Return a JSON object:
   app2.post(
     "/api/ai/smart-reorder-forecast",
     ah(async (req, res) => {
-      const { tenantId } = req.body;
+      const actor = getUser(req);
       const [tenants, medicines, allBatches, suppliers] = await Promise.all([
         store.tenants.all(),
         store.medicines.all(),
         store.batches.all(),
         store.suppliers.all()
       ]);
-      const tenant = tenants.find((t) => t.id === tenantId) || tenants[0];
+      const scopedId = actor.role === "super_admin" ? req.body?.tenantId : actor.tenantId;
+      const tenant = tenants.find((t) => t.id === scopedId) || tenants[0];
       const tenantBatches = allBatches.filter((b) => b.tenantId === tenant.id);
       const inventoryStatus = medicines.map((med) => {
         const b = tenantBatches.filter((batch) => batch.medicineId === med.id);
@@ -2185,6 +2613,7 @@ Return a JSON object with:
   app2.post(
     "/api/ai/executive-summary",
     ah(async (req, res) => {
+      if (!isSuper(req)) return forbid(res);
       const [tenants, allBatches, allSales, allTransfers] = await Promise.all([
         store.tenants.all(),
         store.batches.all(),

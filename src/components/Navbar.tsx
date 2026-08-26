@@ -37,6 +37,8 @@ export const Navbar: React.FC<NavbarProps> = ({ activeTab, setActiveTab, onOpenN
     refreshData, 
     isLoading,
     openAiModalWithTab,
+    reorderReport,
+    setIsReorderAlertOpen,
     logout
   } = usePharmacy();
 
@@ -158,6 +160,30 @@ export const Navbar: React.FC<NavbarProps> = ({ activeTab, setActiveTab, onOpenN
               </div>
             </div>
 
+            {/* Inventory Reorder Alert Button */}
+            <button
+              id="btn-nav-reorder-alert"
+              onClick={() => setIsReorderAlertOpen(true)}
+              title={
+                reorderReport && reorderReport.lowStockCount > 0
+                  ? `${reorderReport.lowStockCount} items below reorder threshold (${reorderReport.thresholdUsed} units). Click to view & draft PO.`
+                  : 'Check Inventory Reorder Thresholds'
+              }
+              className={`relative flex items-center gap-1.5 px-3 py-2 rounded-xl backdrop-blur-md border transition-all cursor-pointer text-xs font-bold shadow-xs ${
+                reorderReport && reorderReport.lowStockCount > 0
+                  ? 'bg-amber-50 hover:bg-amber-100 border-amber-300 text-amber-900 shadow-amber-500/10'
+                  : 'bg-white/60 hover:bg-white/90 border-white/70 text-slate-700'
+              }`}
+            >
+              <AlertTriangle className={`w-4 h-4 ${reorderReport && reorderReport.lowStockCount > 0 ? 'text-amber-600' : 'text-slate-500'}`} />
+              <span className="hidden md:inline">Reorders</span>
+              {reorderReport && reorderReport.lowStockCount > 0 && (
+                <span className="px-1.5 py-0.2 rounded-full text-[10px] font-bold bg-amber-600 text-white animate-pulse">
+                  {reorderReport.lowStockCount}
+                </span>
+              )}
+            </button>
+
             {/* AI Assistant Trigger Button */}
             <button
               id="btn-open-ai-pharmacist"
@@ -231,15 +257,6 @@ export const Navbar: React.FC<NavbarProps> = ({ activeTab, setActiveTab, onOpenN
                   }`}
                 >
                   <span>Cashier / Dispenser</span>
-                </button>
-                <button
-                  id="role-auditor"
-                  onClick={() => handleRoleChange('inventory_auditor')}
-                  className={`w-full px-3 py-1.5 text-left text-xs hover:bg-cyan-50 flex items-center justify-between ${
-                    currentUser.role === 'inventory_auditor' ? 'text-cyan-900 font-bold bg-cyan-100/50' : 'text-slate-700'
-                  }`}
-                >
-                  <span>Stock & Expiry Auditor</span>
                 </button>
                 <div className="border-t border-slate-100 my-1"></div>
                 <button
@@ -400,11 +417,6 @@ export const Navbar: React.FC<NavbarProps> = ({ activeTab, setActiveTab, onOpenN
             <Users className="w-3.5 h-3.5" />
             <span>Staff & Users</span>
           </button>
-        </div>
-
-        <div className="flex items-center gap-2 px-3 py-2 rounded-md text-sm font-medium text-white/90 hover:text-white hover:bg-white/10 transition-colors">
-          <Users className="w-4 h-4" />
-          <span>Users</span>
         </div>
       </div>
     </header>
